@@ -284,10 +284,33 @@ pub struct LinkMember {
     pub account_id: Option<String>,
     pub uid: String,
     pub session_id: String,
+    /// 该副本所属档位（跨档组成员各自不同）。旧存储没有此字段：
+    /// 载入时用组级 `variant` 回填，见 `backfill_member_variants`。
+    #[serde(default)]
+    pub variant: Option<WbVariant>,
     pub state: MemberState,
     pub linked_at: i64,
     #[serde(default)]
     pub last_synced_at: Option<i64>,
+}
+
+/// 成员所属档位：显式保存优先；旧存储（尚未回填）回退组级 `variant`。
+pub fn member_variant(group: &LinkGroup, member: &LinkMember) -> WbVariant {
+    member.variant.unwrap_or(group.variant)
+}
+
+/// 旧存储兼容：成员缺 `variant` 时用组级 `variant` 回填。
+///
+/// 新建成员一律写入显式档位（跨档组必须如此）；仅在 `load_store` 内调用，
+/// 使读取后的存储在身份判定与一致性校验前就具备完整档位信息。
+fn backfill_member_variants(store: &mut LinkStore) {
+    for group in store.groups.iter_mut() {
+        for member in group.members.iter_mut() {
+            if member.variant.is_none() {
+                member.variant = Some(group.variant);
+            }
+        }
+    }
 }
 
 /// 配对基线引用（成员对无序存储，避免同一对出现两条记录）。
@@ -909,7 +932,7 @@ pub fn load_store(paths: &SessionPaths) -> StoreState {
         }
         Err(error) => return StoreState::Unavailable(format!("同步记录无法读取：{error}")),
     };
-    let store = match serde_json::from_str::<LinkStore>(&text) {
+    let mut store = match serde_json::from_str::<LinkStore>(&text) {
         Ok(store) => store,
         Err(_) => {
             return StoreState::Unavailable("同步记录已损坏，原文件已保留".to_string());
@@ -921,6 +944,8 @@ pub fn load_store(paths: &SessionPaths) -> StoreState {
             store.version, LINK_STORE_VERSION
         ));
     }
+    // 旧存储兼容：成员缺 `variant` 时用组级 `variant` 回填（跨档组成员显式保存）。
+    backfill_member_variants(&mut store);
     if let Err(reason) = validate_store(&store) {
         return StoreState::Unavailable(format!("同步记录内容不一致：{reason}"));
     }
@@ -929,7 +954,7 @@ pub fn load_store(paths: &SessionPaths) -> StoreState {
 
 /// 不变量校验（写入前与读取后都执行）：
 /// - 组 id 唯一；
-/// - 同一 (variant, uid, sessionId) 只属于一个组；
+/// - 同一 (variant, uid, sessionId) 只属于一个组（成员档位取 `member_variant`）；
 /// - 每组每个账号至多一个 active 成员；
 /// - 配对基线双方都在组内且不重复。
 pub fn validate_store(store: &LinkStore) -> Result<(), String> {
@@ -946,7 +971,7 @@ pub fn validate_store(store: &LinkStore) -> Result<(), String> {
                 return Err(format!("成员记录重复：{}", member.member_id));
             }
             let identity = (
-                group.variant.as_str(),
+                member_variant(group, member).as_str(),
                 member.uid.as_str(),
                 member.session_id.as_str(),
             );
@@ -1023,7 +1048,7 @@ pub fn with_link_store_write<T>(
     Ok(outcome)
 }
 
-/// 按 (variant, uid, sessionId) 查找所属组（身份唯一归组）。
+/// 按 (variant, uid, sessionId) 查找所属组（身份唯一归组；成员档位取 `member_variant`）。
 pub fn find_group_for_identity<'a>(
     store: &'a LinkStore,
     variant: WbVariant,
@@ -1031,11 +1056,11 @@ pub fn find_group_for_identity<'a>(
     session_id: &str,
 ) -> Option<&'a LinkGroup> {
     store.groups.iter().find(|group| {
-        group.variant == variant
-            && group
-                .members
-                .iter()
-                .any(|member| member.uid == uid && member.session_id == session_id)
+        group.members.iter().any(|member| {
+            member_variant(group, member) == variant
+                && member.uid == uid
+                && member.session_id == session_id
+        })
     })
 }
 
@@ -1589,6 +1614,7 @@ mod tests {
             account_id: None,
             uid: uid.to_string(),
             session_id: session_id.to_string(),
+            variant: None,
             state,
             linked_at: 1,
             last_synced_at: None,
@@ -1981,6 +2007,87 @@ mod tests {
             groups,
         };
         serde_json::to_string_pretty(&store).unwrap()
+    }
+
+    /// 旧存储（成员没有 `variant` 字段）载入时用组级档位回填，行为与改造前一致。
+    #[test]
+    fn load_backfills_member_variant_from_group() {
+        let dir = TempDir::new("member-variant-backfill");
+        let paths = temp_paths(&dir);
+        std::fs::create_dir_all(&paths.store_root).unwrap();
+
+        // 手工写入"旧版"存储：AI 档位的组，成员没有 variant 字段。
+        let legacy = serde_json::json!({
+            "version": LINK_STORE_VERSION,
+            "revision": 3,
+            "groups": [{
+                "id": "g-legacy",
+                "variant": "ai",
+                "createdAt": 1,
+                "members": [{
+                    "memberId": "m-1",
+                    "uid": "uid-a",
+                    "sessionId": "sess-1",
+                    "state": "active",
+                    "linkedAt": 1
+                }],
+                "pairBases": []
+            }]
+        });
+        std::fs::write(paths.session_links_file(), legacy.to_string()).unwrap();
+
+        let StoreState::Ready(store) = load_store(&paths) else {
+            panic!("旧存储应当可读（成员档位由组级回填）");
+        };
+        let group = &store.groups[0];
+        assert_eq!(group.members[0].variant, Some(WbVariant::Ai));
+        assert_eq!(member_variant(group, &group.members[0]), WbVariant::Ai);
+    }
+
+    /// 跨档组：成员各自保存档位；身份查找与一致性校验按成员档位匹配。
+    #[test]
+    fn cross_variant_group_members_keep_own_variant() {
+        let mut cn = member("uid-cn", "sess-cn", MemberState::Active);
+        cn.variant = Some(WbVariant::Cn);
+        let mut ai = member("uid-ai", "sess-ai", MemberState::Active);
+        ai.variant = Some(WbVariant::Ai);
+        let store = LinkStore {
+            version: LINK_STORE_VERSION,
+            revision: 1,
+            groups: vec![group_with_members("g-cross", vec![cn, ai])],
+        };
+
+        validate_store(&store).expect("跨档组应通过一致性校验");
+        assert!(find_group_for_identity(&store, WbVariant::Ai, "uid-ai", "sess-ai").is_some());
+        assert!(find_group_for_identity(&store, WbVariant::Cn, "uid-cn", "sess-cn").is_some());
+        // 身份必须带档位：拿另一档身份查同一成员不命中。
+        assert!(find_group_for_identity(&store, WbVariant::Cn, "uid-ai", "sess-ai").is_none());
+        assert!(find_group_for_identity(&store, WbVariant::Ai, "uid-cn", "sess-cn").is_none());
+    }
+
+    /// 显式档位随存储往返保留（写回后重新载入仍是成员自己的档位）。
+    #[test]
+    fn explicit_member_variant_round_trips() {
+        let dir = TempDir::new("member-variant-roundtrip");
+        let paths = temp_paths(&dir);
+        let mut ai = member("uid-ai", "sess-ai", MemberState::Active);
+        ai.variant = Some(WbVariant::Ai);
+        let mut cn = member("uid-cn", "sess-cn", MemberState::Active);
+        cn.variant = Some(WbVariant::Cn);
+        with_link_store_write(&paths, |store| {
+            store
+                .groups
+                .push(group_with_members("g-cross", vec![ai, cn]));
+            Ok(())
+        })
+        .unwrap();
+
+        let StoreState::Ready(store) = load_store(&paths) else {
+            panic!("写回后应可重新载入");
+        };
+        let members = &store.groups[0].members;
+        assert_eq!(members[0].variant, Some(WbVariant::Ai));
+        assert_eq!(members[1].variant, Some(WbVariant::Cn));
     }
 
     #[test]
