@@ -624,6 +624,34 @@ pub async fn copy_sessions(
     .map_err(|e| e.to_string())?
 }
 
+/// POST /api/sessions/copy-cross —— 跨档复制：源与目标账号都显式给出（会话管理页用）。
+///
+/// 与 `copy_sessions` 同形，只多一个 `sourceAccountId`：源 uid 取自该账号，
+/// 不再从目标档登录态读取，支持国内版 ↔ 国际版。写入侧仍以目标账号为准。
+#[tauri::command(rename_all = "camelCase")]
+pub async fn copy_sessions_cross(
+    source_account_id: String,
+    target_account_id: String,
+    session_ids: Vec<String>,
+) -> Result<Value, String> {
+    if source_account_id.trim().is_empty() {
+        return Err("缺少 sourceAccountId".to_string());
+    }
+    if target_account_id.trim().is_empty() {
+        return Err("缺少 targetAccountId".to_string());
+    }
+    if session_ids.is_empty() {
+        return Err("缺少 sessionIds".to_string());
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let source = account::find_account(&source_account_id).ok_or("源账号不存在")?;
+        let target = account::find_account(&target_account_id).ok_or("目标账号不存在")?;
+        session::copy_sessions_cross(&source, &target, &session_ids)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// 预览「当前账号 → 目标账号」的关联会话同步项（桌面端 command）。
 ///
 /// 只读：返回 `supported / storeStatus / groups`，其中每组的 `defaultChecked` 与

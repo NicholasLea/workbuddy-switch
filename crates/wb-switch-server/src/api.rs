@@ -124,6 +124,7 @@ pub fn router() -> Router {
         .route("/api/switch/progress", get(api_switch_progress))
         .route("/api/sessions", get(api_sessions))
         .route("/api/sessions/copy", post(api_copy_sessions))
+        .route("/api/sessions/copy-cross", post(api_copy_sessions_cross))
         .route(
             "/api/session-links/preview",
             post(api_session_links_preview),
@@ -853,6 +854,49 @@ async fn api_copy_sessions(Json(body): Json<Value>) -> Response {
         }
     };
     report["variant"] = json!(variant.as_str());
+    json_ok(report)
+}
+
+/// POST /api/sessions/copy-cross —— 跨档复制：源与目标账号都显式给出（会话管理页用）。
+///
+/// 与 `POST /api/sessions/copy` 同形，多一个 `sourceAccountId`：源 uid 取自该账号，
+/// 不再从目标档登录态读取，支持国内版 ↔ 国际版。报告与桌面端 `copy_sessions_cross`
+/// 同形（含 `sourceVariant` / `targetVariant`）。
+async fn api_copy_sessions_cross(Json(body): Json<Value>) -> Response {
+    let source_account_id = body
+        .get("sourceAccountId")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let target_account_id = body
+        .get("targetAccountId")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let session_ids: Vec<String> = body
+        .get("sessionIds")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    let Some(source) = account::find_account(&source_account_id) else {
+        return json_err("源账号不存在".to_string(), StatusCode::BAD_REQUEST);
+    };
+    let Some(target) = account::find_account(&target_account_id) else {
+        return json_err("目标账号不存在".to_string(), StatusCode::BAD_REQUEST);
+    };
+    let target_variant = account::variant_of(&target);
+    let mut report = match session::copy_sessions_cross(&source, &target, &session_ids) {
+        Ok(report) => report,
+        Err(error) => {
+            return json_err(error, StatusCode::BAD_REQUEST);
+        }
+    };
+    // 与同档端点同形：`variant` 恒为目标档（前端按目标账号渲染）。
+    report["variant"] = json!(target_variant.as_str());
     json_ok(report)
 }
 

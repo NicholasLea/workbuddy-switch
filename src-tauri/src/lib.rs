@@ -220,6 +220,7 @@ pub fn run() {
             commands::switch_account,
             commands::list_sessions,
             commands::copy_sessions,
+            commands::copy_sessions_cross,
             commands::session_links_preview,
             commands::open_permission_settings,
             commands::check_auth_permission,

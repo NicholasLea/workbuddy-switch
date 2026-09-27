@@ -614,6 +614,11 @@ pub struct Operation {
     /// `copy`（第一步）／`sync`（第二步预留）。
     pub kind: String,
     pub variant: WbVariant,
+    /// 源档位：跨档复制时与 [`Self::variant`]（目标档）不同；同档与旧记录缺省为 `None`。
+    ///
+    /// 恢复时据此解析源档数据根（正文与源行读取），旧记录一律按同档处理。
+    #[serde(default)]
+    pub source_variant: Option<WbVariant>,
     /// 目标组 id：新建组时在写入前预分配，恢复时复用同一个组。
     pub group_id: String,
     pub source: OperationMember,
@@ -1637,6 +1642,7 @@ mod tests {
             operation_id: id.to_string(),
             kind: "copy".to_string(),
             variant: WbVariant::Cn,
+            source_variant: None,
             group_id: "g-1".to_string(),
             source: OperationMember {
                 account_id: None,
@@ -2066,6 +2072,29 @@ mod tests {
     }
 
     /// 显式档位随存储往返保留（写回后重新载入仍是成员自己的档位）。
+    /// 旧版操作记录（没有 `sourceVariant` 字段）可正常载入：一律按同档处理。
+    #[test]
+    fn legacy_operation_without_source_variant_deserializes() {
+        let legacy = serde_json::json!({
+            "version": OPERATION_VERSION,
+            "operationId": "op-legacy",
+            "kind": "copy",
+            "variant": "cn",
+            "groupId": "g-1",
+            "source": {"uid": "uid-a", "sessionId": "sess-1"},
+            "target": {"uid": "uid-b", "sessionId": "sess-b"},
+            "expectedContentDigest": "d",
+            "expectedRecordCount": 1,
+            "phase": "prepared",
+            "backup": null,
+            "createdAt": 1,
+            "updatedAt": 1
+        });
+        let operation: Operation = serde_json::from_value(legacy).unwrap();
+        assert_eq!(operation.source_variant, None);
+        assert_eq!(operation.variant, WbVariant::Cn);
+    }
+
     #[test]
     fn explicit_member_variant_round_trips() {
         let dir = TempDir::new("member-variant-roundtrip");
