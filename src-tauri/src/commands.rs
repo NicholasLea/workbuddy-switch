@@ -603,6 +603,16 @@ pub fn list_sessions(variant: Option<String>) -> Value {
     }
 }
 
+/// GET /api/sessions/account —— 指定账号名下的会话列表（会话管理页源账号视角）。
+#[tauri::command(rename_all = "camelCase")]
+pub fn list_account_sessions(account_id: String) -> Result<Value, String> {
+    if account_id.trim().is_empty() {
+        return Err("缺少 accountId".to_string());
+    }
+    let account = account::find_account(&account_id).ok_or("账号不存在")?;
+    Ok(session::list_sessions_for_account(&account))
+}
+
 /// POST /api/sessions/copy —— 把勾选会话复制到指定账号（路径 B）。
 #[tauri::command(rename_all = "camelCase")]
 pub async fn copy_sessions(

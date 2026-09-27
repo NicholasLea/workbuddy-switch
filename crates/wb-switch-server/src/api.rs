@@ -123,6 +123,7 @@ pub fn router() -> Router {
         .route("/api/switch", post(api_switch))
         .route("/api/switch/progress", get(api_switch_progress))
         .route("/api/sessions", get(api_sessions))
+        .route("/api/sessions/account", get(api_account_sessions))
         .route("/api/sessions/copy", post(api_copy_sessions))
         .route("/api/sessions/copy-cross", post(api_copy_sessions_cross))
         .route(
@@ -201,6 +202,15 @@ fn query_variant(query: Option<&str>) -> WbVariant {
 /// 从请求体解析档位（缺省国内版）。与 Tauri 命令的可选 `variant` 参数同义。
 fn body_variant(body: &Value) -> WbVariant {
     WbVariant::parse(body.get("variant").and_then(Value::as_str))
+}
+
+/// 从 query string 取指定键的原值（键值均为账号 id 这类 ASCII 串；
+/// 与 `query_variant` 同一解析口径，不做百分号解码）。
+fn query_param(query: Option<&str>, key: &str) -> Option<String> {
+    query.unwrap_or("").split('&').find_map(|pair| {
+        let (name, value) = pair.split_once('=').unwrap_or((pair, ""));
+        (name == key).then_some(value.to_string())
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -824,6 +834,18 @@ async fn api_sessions(RawQuery(query): RawQuery) -> Response {
         })),
         None => json_ok(json!({ "sessions": [], "current": null, "variant": variant.as_str() })),
     }
+}
+
+/// GET /api/sessions/account —— 指定账号名下的会话列表（会话管理页的源账号视角）。
+///
+/// 与 `GET /api/sessions` 同形，但来源是显式账号（`accountId` query）：账号不存在
+/// 返回 400；账号缺 uid 时返回空列表 + `current: null`（与现有容错一致）。
+async fn api_account_sessions(RawQuery(query): RawQuery) -> Response {
+    let account_id = query_param(query.as_deref(), "accountId").unwrap_or_default();
+    let Some(account) = account::find_account(&account_id) else {
+        return json_err("账号不存在".to_string(), StatusCode::BAD_REQUEST);
+    };
+    json_ok(session::list_sessions_for_account(&account))
 }
 
 async fn api_copy_sessions(Json(body): Json<Value>) -> Response {

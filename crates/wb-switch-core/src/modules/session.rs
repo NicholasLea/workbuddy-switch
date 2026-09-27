@@ -371,6 +371,23 @@ pub fn list_sessions_for_user(variant: WbVariant, uid: &str) -> Value {
     list_sessions_for_user_at(&SessionPaths::for_variant(variant), uid)
 }
 
+/// 指定账号名下的会话列表（会话管理页的源账号视角）。
+///
+/// 与 `GET /api/sessions` 的返回同形（`sessions / current / variant`），但来源是
+/// 显式账号而非登录态；账号缺 uid 时返回空列表 + `current: null`（与现有容错一致）。
+pub fn list_sessions_for_account(account: &Value) -> Value {
+    let variant = account::variant_of(account);
+    let uid = account_uid(account);
+    if uid.is_empty() {
+        return json!({ "sessions": [], "current": Value::Null, "variant": variant.as_str() });
+    }
+    json!({
+        "sessions": list_sessions_for_user(variant, &uid),
+        "current": uid,
+        "variant": variant.as_str(),
+    })
+}
+
 fn list_sessions_for_user_at(paths: &SessionPaths, uid: &str) -> Value {
     let db = paths.workbuddy_db();
     if !db.is_file() {

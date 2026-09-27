@@ -219,6 +219,7 @@ pub fn run() {
             commands::import_accounts,
             commands::switch_account,
             commands::list_sessions,
+            commands::list_account_sessions,
             commands::copy_sessions,
             commands::copy_sessions_cross,
             commands::session_links_preview,
