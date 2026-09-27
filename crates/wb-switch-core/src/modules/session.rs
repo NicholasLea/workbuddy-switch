@@ -290,9 +290,31 @@ pub fn session_copy_supported_at(root: &Path) -> bool {
 /// 档位不支持会话复制时的统一错误文案。
 pub const SESSION_COPY_UNSUPPORTED: &str = "该档位暂不支持会话复制";
 
-/// WorkBuddy 正在运行时的统一错误文案：会话写入必须在 App 停止写入之后。
+/// 目标账号是当前登录账号、且 WorkBuddy 正在运行时的统一错误文案。
+///
+/// 写"非当前登录账号"的副本实测免关安全（`research/verification-app-running-write.md`
+/// 探针 5）：客户端不使用该账号的数据、切号后自然可见；写"当前登录账号"仍必须等
+/// App 停止写入——运行实例看不到写入，继续对话会让会话状态分叉。
 pub const SESSION_COPY_APP_RUNNING: &str =
-    "WorkBuddy 正在运行，已阻止修改会话数据；请先退出 WorkBuddy 后重试";
+    "目标账号正在 WorkBuddy 中使用，已阻止修改会话数据；请先退出 WorkBuddy 后重试";
+
+/// 目标档客户端运行时的写入门禁：仅当目标账号是该档位**当前登录账号**时拦截。
+///
+/// 无法读取登录态时保守拦截（宁可要求退出，不做无法判定的写入）。
+fn app_running_blocks_target_write(
+    paths: &SessionPaths,
+    variant: WbVariant,
+    target_uid: &str,
+    is_app_running: &impl Fn(WbVariant) -> bool,
+) -> bool {
+    if !is_app_running(variant) {
+        return false;
+    }
+    match current_user_uid_at(&paths.auth_file) {
+        Some(current) => current == target_uid,
+        None => true,
+    }
+}
 
 /// 操作日志无法解析时的原因前缀（恢复与复制共用，避免漏报后写出第二个副本）。
 const UNPARSEABLE_OPERATION_REASON: &str = "操作记录无法解析";
@@ -815,8 +837,9 @@ fn copy_sessions_cross_at(
     is_app_running: impl Fn(WbVariant) -> bool,
     resolve_source_paths: impl Fn(WbVariant) -> SessionPaths,
 ) -> Result<Value, String> {
-    // 快拒只针对**目标档**（写侧）：源档只读，运行中的源客户端不影响读取安全。
-    if is_app_running(target.variant) {
+    // 快拒只针对**目标档**（写侧）：源档只读，运行中的源客户端不影响读取安全；
+    // 目标账号不是当前登录账号时免关直接写（实测，见门禁函数注释）。
+    if app_running_blocks_target_write(target.paths, target.variant, &target.uid, &is_app_running) {
         return Err(SESSION_COPY_APP_RUNNING.to_string());
     }
     // 源档也要读（正文与源行），国际版数据根不同构时同样不支持（design D6）。
@@ -846,9 +869,6 @@ fn copy_sessions_for_switch_at(
     session_ids: &[String],
     is_app_running: impl Fn(WbVariant) -> bool,
 ) -> Result<Value, String> {
-    if is_app_running(variant) {
-        return Err(SESSION_COPY_APP_RUNNING.to_string());
-    }
     // 探测只对国际版生效（design D6 针对的是国际版数据根不同构）。国内版数据根与
     // 改造前同构，保留改造前的路径与返回结构，不让国内版看到「暂不支持」类新文案。
     ensure_session_copy_supported(paths, variant)?;
@@ -860,6 +880,11 @@ fn copy_sessions_for_switch_at(
         .ok_or_else(|| "未读取到本机登录态，无法确定来源账号".to_string())?;
     if source_uid == target_uid {
         return Err("当前账号与目标账号相同，无需复制会话".to_string());
+    }
+    // 同档路径的源恒为当前登录账号、且上面已拦同账号，因此这里对"目标=当前登录"
+    // 恒为放行；保留统一门禁只为与其他写入入口共用同一条规则。
+    if app_running_blocks_target_write(paths, variant, &target_uid, &is_app_running) {
+        return Err(SESSION_COPY_APP_RUNNING.to_string());
     }
     let source = CopySide {
         paths,
@@ -937,8 +962,8 @@ fn run_copy(
             )?);
         }
     }
-    // 复查：锁前未运行、拿锁后 App 已被启动的情况在这里被拦住，不写入任何产物。
-    if is_app_running(target.variant) {
+    // 复查：锁前未运行、拿锁后目标账号被登录进 App 的情况在这里被拦住，不写入任何产物。
+    if app_running_blocks_target_write(target.paths, target.variant, &target.uid, &is_app_running) {
         return Err(SESSION_COPY_APP_RUNNING.to_string());
     }
     let recovery = recover_pending_session_operations_at_with(
@@ -2342,10 +2367,6 @@ fn sync_sessions_for_switch_at(
     if selections.is_empty() {
         return Ok(json!({ "synced": synced, "skipped": skipped, "errors": errors }));
     }
-    // 与复制同一条生命周期保护：会话写入必须发生在 App 停止写入之后。
-    if is_app_running(variant) {
-        return Err(SESSION_COPY_APP_RUNNING.to_string());
-    }
     if variant == WbVariant::Ai && !session_copy_supported_at(&paths.data_root) {
         return Err(format!(
             "{SESSION_SYNC_UNSUPPORTED}（档位 {}）",
@@ -2361,10 +2382,15 @@ fn sync_sessions_for_switch_at(
     if source_uid == target_uid {
         return Err("当前账号与目标账号相同，无需同步会话".to_string());
     }
+    // 与复制同一条门禁：同档路径的源恒为当前登录账号，这里恒为放行（统一规则）。
+    if app_running_blocks_target_write(paths, variant, &target_uid, &is_app_running) {
+        return Err(SESSION_COPY_APP_RUNNING.to_string());
+    }
 
     // 档位操作锁与复制共用：预览后的校验与写入都不得与并发复制交错。
     let _ops_lock = session_link::try_acquire_variant_ops_lock(paths, variant)?;
-    if is_app_running(variant) {
+    // 复查：锁前未运行、拿锁后目标账号被登录进 App 的情况在这里被拦住。
+    if app_running_blocks_target_write(paths, variant, &target_uid, &is_app_running) {
         return Err(SESSION_COPY_APP_RUNNING.to_string());
     }
     let recovery = recover_pending_session_operations_at(paths, variant);
@@ -2519,9 +2545,9 @@ fn sync_sessions_cross_at(
     if selections.is_empty() {
         return Ok(json!({ "synced": synced, "skipped": skipped, "errors": errors }));
     }
-    // 与复制同一条生命周期保护：会话写入必须发生在**目标档** App 停止写入之后
+    // 与复制同一条门禁：仅当目标账号是目标档当前登录账号时才要求关闭客户端
     // （源档只读，运行中的源客户端不影响读取安全）。
-    if is_app_running(variant) {
+    if app_running_blocks_target_write(target.paths, target.variant, &target.uid, &is_app_running) {
         return Err(SESSION_COPY_APP_RUNNING.to_string());
     }
     // 源档也要读（源正文与源行），国际版数据根不同构时同样不支持（与复制同口径）。
@@ -2556,8 +2582,8 @@ fn sync_sessions_cross_at(
             )?);
         }
     }
-    // 复查：锁前未运行、拿锁后 App 已被启动的情况在这里被拦住，不写入任何产物。
-    if is_app_running(variant) {
+    // 复查：锁前未运行、拿锁后目标账号被登录进 App 的情况在这里被拦住，不写入任何产物。
+    if app_running_blocks_target_write(target.paths, target.variant, &target.uid, &is_app_running) {
         return Err(SESSION_COPY_APP_RUNNING.to_string());
     }
     let recovery =
@@ -5416,10 +5442,11 @@ mod tests {
         assert_eq!(report["copied"].as_array().unwrap().len(), 1);
     }
 
-    /// 拿档位锁后复查 App 是否运行：锁前未运行、拿锁后已被启动 → 拒绝且不写任何产物。
+    /// 目标账号不是当前登录账号（auth=uid-a）时，App 运行中不再拦截写入（S5 实测口径）；
+    /// 快拒与锁后复查仍各执行一次，且复查必须发生在持锁之后、写入之前。
     #[test]
-    fn copy_rechecks_app_running_after_acquiring_lock() {
-        let env = ready_env("app-raced");
+    fn copy_runs_while_app_running_for_non_current_account() {
+        let env = ready_env("app-running-non-current");
         let probes = std::cell::Cell::new(0usize);
         let lock_held_on_recheck = std::cell::Cell::new(false);
         let lock_path = env.paths.variant_ops_lock_file(WbVariant::Cn);
@@ -5427,7 +5454,7 @@ mod tests {
             let n = probes.get() + 1;
             probes.set(n);
             if n == 1 {
-                false
+                true
             } else {
                 // 第二次必须发生在持锁之后：此时再抢同一把锁应为 Busy。
                 match session_link::try_lock_file(&lock_path) {
@@ -5440,31 +5467,22 @@ mod tests {
                 true
             }
         };
-        let err = copy_sessions_for_switch_at(
+        let report = copy_sessions_for_switch_at(
             &env.paths(),
             WbVariant::Cn,
             &env.target("uid-b"),
             &["sess-1".to_string()],
             probe,
         )
-        .expect_err("拿锁后复查为运行中必须拒绝");
-        assert_eq!(err, SESSION_COPY_APP_RUNNING);
-        assert_eq!(probes.get(), 2, "锁前与锁后各检查一次");
+        .expect("目标非当前登录账号：运行中必须放行");
+        assert_eq!(report["copied"].as_array().unwrap().len(), 1);
+        assert_eq!(probes.get(), 2, "快拒与锁后复查各检查一次");
         assert!(
             lock_held_on_recheck.get(),
             "复查必须发生在已经拿到档位锁之后、任何写入之前"
         );
-        assert_eq!(env.body_files().len(), 1, "不得写入复制后的内容");
-        assert_eq!(env.rows_for("uid-b").len(), 0, "不得写入数据库行");
-        assert!(
-            !env.paths.session_links_file().exists(),
-            "不得初始化同步记录"
-        );
-        assert!(session_link::pending_operations(&env.paths(), WbVariant::Cn).is_empty());
-
-        // 锁已释放：探针改回「未运行」后复制照常成功。
-        let report = copy(&env, "uid-b", &["sess-1"]);
-        assert_eq!(report["copied"].as_array().unwrap().len(), 1);
+        assert_eq!(env.rows_for("uid-b").len(), 1, "副本行已写入");
+        assert!(env.paths.session_links_file().exists(), "关联记录已建立");
     }
 
     // ---------------------------------------------------------------------------
@@ -5984,12 +6002,20 @@ mod tests {
                     WbVariant::Cn => self.cn_data.clone(),
                     WbVariant::Ai => self.ai_data.clone(),
                 },
-                // 跨档入口不读登录态；保留路径仅为结构完整。
+                // 跨档入口不读登录态（源 uid 由调用方显式传入）；门禁用它判断
+                // 目标账号是否为该档当前登录账号。
                 auth_file: self
                     .store_root
                     .join(format!("auth-{}.info", variant.as_str())),
                 link_namespace: LinkNamespace::WorkBuddy,
             }
+        }
+
+        /// 写入指定档位的登录态（门禁读 `account.uid` 判定目标是否当前登录账号）。
+        fn set_login(&self, variant: WbVariant, uid: &str) {
+            let path = self.paths(variant).auth_file;
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, json!({"account": {"uid": uid}}).to_string()).unwrap();
         }
 
         /// 建 sessions 表；`extra` 追加一列，用于模拟两档列集合差异。
@@ -6121,6 +6147,92 @@ mod tests {
             |variant| env.paths(variant),
         )
         .unwrap()
+    }
+
+    /// 与 `cross_copy` 相同，但注入「App 是否运行」探针（门禁测试用）。
+    fn cross_copy_with_probe(
+        env: &CrossEnv,
+        source_variant: WbVariant,
+        source_uid: &str,
+        target_variant: WbVariant,
+        target_uid: &str,
+        ids: &[&str],
+        is_app_running: impl Fn(WbVariant) -> bool,
+    ) -> Result<Value, String> {
+        let source_paths = env.paths(source_variant);
+        let target_paths = env.paths(target_variant);
+        let ids: Vec<String> = ids.iter().map(|id| id.to_string()).collect();
+        copy_sessions_cross_at(
+            cross_side(&source_paths, source_variant, source_uid),
+            cross_side(&target_paths, target_variant, target_uid),
+            &ids,
+            is_app_running,
+            |variant| env.paths(variant),
+        )
+    }
+
+    /// 跨档门禁只拦「目标账号 = 目标档当前登录账号」：App 运行中
+    /// 目标≠当前登录 → 放行；目标=当前登录 → 拒绝；读不到登录态 → 保守拒绝。
+    #[test]
+    fn cross_copy_gate_only_blocks_current_login_target() {
+        let env = CrossEnv::new("cross-gate");
+        env.create_db(WbVariant::Cn, "");
+        env.create_edge_db(WbVariant::Cn);
+        env.create_db(WbVariant::Ai, "");
+        env.create_edge_db(WbVariant::Ai);
+        env.add_session(WbVariant::Cn, "sess-1", "uid-a", "标题一");
+        env.add_body(WbVariant::Cn, "sess-1", &body_text("sess-1"));
+
+        let run = |uid: &str| {
+            cross_copy_with_probe(
+                &env,
+                WbVariant::Cn,
+                "uid-a",
+                WbVariant::Ai,
+                uid,
+                &["sess-1"],
+                |_| true,
+            )
+        };
+
+        // 目标档登录的是别人（uid-x）：运行中放行，副本落库。
+        env.set_login(WbVariant::Ai, "uid-x");
+        let report = run("uid-b").expect("目标≠当前登录：运行中必须放行");
+        let new_id = report["copied"][0]["newId"].as_str().unwrap().to_string();
+        assert_eq!(env.rows_for(WbVariant::Ai, "uid-b"), vec![new_id]);
+
+        // 目标账号正是目标档当前登录账号：运行中拒绝，且不再写入。
+        env.set_login(WbVariant::Ai, "uid-b");
+        let err = run("uid-b").unwrap_err();
+        assert_eq!(err, SESSION_COPY_APP_RUNNING);
+        assert_eq!(
+            env.rows_for(WbVariant::Ai, "uid-b").len(),
+            1,
+            "未新增副本行"
+        );
+
+        // 读不到登录态（认证文件缺失）：保守拒绝。
+        std::fs::remove_file(env.paths(WbVariant::Ai).auth_file).unwrap();
+        let err = run("uid-b").unwrap_err();
+        assert_eq!(err, SESSION_COPY_APP_RUNNING);
+
+        // App 未运行：任何目标都放行（登录态缺失也不再拦截）；此时源会话已有
+        // 有效副本，返回 alreadyLinked 而非再次复制。
+        let report = cross_copy_with_probe(
+            &env,
+            WbVariant::Cn,
+            "uid-a",
+            WbVariant::Ai,
+            "uid-b",
+            &["sess-1"],
+            |_| false,
+        )
+        .unwrap();
+        assert!(
+            !report["alreadyLinked"].as_array().unwrap().is_empty(),
+            "{report}"
+        );
+        assert!(report.get("errors").is_none(), "{report}");
     }
 
     /// 基础跨档复制（CN → AI）：正文按源工作区同名目录落到目标档，行/映射写目标档，
@@ -7429,16 +7541,18 @@ mod tests {
         let target_body_before = std::fs::read_to_string(env.body_path(&target_id)).unwrap();
         let one = [selection(&group_id, &token, SyncMode::FastForward)];
 
-        // App 运行中 → 拒绝（与复制同一条生命周期保护），不写任何东西。
-        let err = sync_sessions_for_switch_at(
+        // 目标账号不是当前登录账号（auth=uid-a）：App 运行中不再拦截，正常同步（S5 实测口径）。
+        let report = sync_sessions_for_switch_at(
             &env.paths(),
             WbVariant::Cn,
             &env.target("uid-b"),
             &one,
             |_| true,
         )
-        .unwrap_err();
-        assert_eq!(err, SESSION_COPY_APP_RUNNING);
+        .unwrap();
+        assert_eq!(report["synced"].as_array().unwrap().len(), 1);
+        let target_body_after = std::fs::read_to_string(env.body_path(&target_id)).unwrap();
+        assert_ne!(target_body_before, target_body_after, "目标正文已追平");
 
         // 空选择项 → 什么都不做，也不要求关闭 App。
         let report = sync_sessions_for_switch_at(
@@ -7473,9 +7587,10 @@ mod tests {
         .unwrap_err();
         assert!(err.contains("当前账号与目标账号相同"), "{err}");
 
+        // 失败的两条（缺 uid / 同账号）都不应再触碰目标正文。
         assert_eq!(
             std::fs::read_to_string(env.body_path(&target_id)).unwrap(),
-            target_body_before
+            target_body_after
         );
     }
 
