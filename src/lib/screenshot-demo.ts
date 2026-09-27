@@ -2,7 +2,7 @@ import type {
   AccountMeta, AppStatus, AutoRotateConfig, CheckinConfig, CheckinLog,
   CodeBuddyCliStatus, CodeBuddyCliSwitchResult, CodeBuddyCnIdeStatus, CreditExpiry, CreditOfficialUsageModel, CreditStatistics,
   GithubConfig, RateLimitHookStatus, RateLimitsPayload, RotateLog, RotateStatus, TokenStatistics, TokenStatsGroup, TokenStatsRequestRow, TokenStatsSource, TokenStatsTotals,
-  SessionLinksPreview, TravelConfig, TravelStatus, VscodeExtStatus, VscodeSessionList,
+  Session, SessionLinksPreview, TravelConfig, TravelStatus, VscodeExtStatus, VscodeSessionList,
 } from "./types";
 import { demoModeEnabled } from "./demo-mode";
 import { accountVariant, normalizeVariant, variantSupportsCheckin } from "./variant";
@@ -599,6 +599,20 @@ function demoIdeSessionList(sourceUid: string): VscodeSessionList {
   };
 }
 
+/** 演示用的「会话管理页」会话列表：任务（playground）与空间（按 cwd 分组）两种形态。 */
+function demoAccountSessions(intl: boolean): Session[] {
+  const now = Date.now();
+  const project = intl ? "/Users/demo/WorkBuddy AI/2026-09-18-01-33-29" : "/Users/demo/WorkBuddy/2026-09-18-01-33-29";
+  const repo = intl ? "/Users/demo/projects/intl-app" : "/Users/demo/projects/wb-switch";
+  return [
+    { id: "demo-sess-task-1", title: "整理会话复制文案", cwd: project, updatedAt: now - 1000 * 60 * 8, hasHistory: true, isPlayground: true },
+    { id: "demo-sess-task-2", title: "生成 changelog 草稿", cwd: project, updatedAt: now - 1000 * 60 * 95, hasHistory: true, isPlayground: true },
+    { id: "demo-sess-space-1", title: "跨档复制内核改造", cwd: repo, updatedAt: now - 1000 * 60 * 40, hasHistory: true },
+    { id: "demo-sess-space-2", title: "会话管理页骨架", cwd: repo, updatedAt: now - 1000 * 60 * 60 * 5, hasHistory: true },
+    { id: "demo-sess-space-3", title: "发布前回归检查", cwd: "/Users/demo/Documents/notes", updatedAt: now - 1000 * 60 * 60 * 26, hasHistory: true },
+  ];
+}
+
 /** Read-only demo response provider. It never reads or mutates real user data. */
 export function screenshotDemoResponse(command: string, args?: Record<string, unknown>): unknown {
   const demoAccounts = hydratedAccounts();
@@ -626,6 +640,15 @@ export function screenshotDemoResponse(command: string, args?: Record<string, un
       return { ...appStatus, variant };
     }
     case "get_accounts": return { accounts: demoAccounts };
+    // 会话管理页：按账号返回演示会话；国际版账号给一套不同 cwd，混排时可见档位差异。
+    case "account_sessions": {
+      const account = demoAccounts.find((item) => item.id === args?.accountId) ?? demoAccounts[0];
+      return {
+        sessions: demoAccountSessions(account.id === intlAccountA.id),
+        current: account.uid ?? "demo-uid",
+        variant: accountVariant(account),
+      };
+    }
     case "get_codebuddy_cli_status": return cliStatus;
     // 让演示里存在一个「CodeBuddy IDE 当前账号」：否则 IDE 标记与选中态染色（淡紫）在演示里永远不可见。
     // 取第二个账号，使三张卡各自演示一种形态（A 占位行 / B IDE 选中 / C 查看全部）。
