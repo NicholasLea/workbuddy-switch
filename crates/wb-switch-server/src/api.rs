@@ -1313,19 +1313,25 @@ async fn static_handler(uri: Uri) -> Response {
     if path.is_empty() || path == "index.html" {
         path = "index.html".to_string();
     }
-    // 前端路由回退到 index.html
-    let data = Assets::get(&path).or_else(|| Assets::get("index.html"));
-    match data {
-        Some(f) => Response::builder()
-            .status(StatusCode::OK)
-            .header(header::CONTENT_TYPE, content_type(&path))
-            .body(Body::from(f.data.into_owned()))
-            .unwrap(),
-        None => Response::builder()
-            .status(StatusCode::NOT_FOUND)
-            .body(Body::from("not found"))
-            .unwrap(),
-    }
+    // 前端路由回退到 index.html。Content-Type 必须按**实际命中的文件**给：按请求路径算
+    // 会把 `/sessions` 这类前端路由标成 application/octet-stream，浏览器直接当下载。
+    let (data, served) = match Assets::get(&path) {
+        Some(f) => (f, path),
+        None => match Assets::get("index.html") {
+            Some(f) => (f, "index.html".to_string()),
+            None => {
+                return Response::builder()
+                    .status(StatusCode::NOT_FOUND)
+                    .body(Body::from("not found"))
+                    .unwrap()
+            }
+        },
+    };
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, content_type(&served))
+        .body(Body::from(data.data.into_owned()))
+        .unwrap()
 }
 
 // ---------------------------------------------------------------------------
@@ -1361,9 +1367,29 @@ async fn api_clear_notifications() -> Response {
 
 #[cfg(test)]
 mod tests {
-    use super::{body_variant, checkin_status_item, query_variant};
+    use super::{body_variant, checkin_status_item, query_variant, static_handler};
+    use axum::http::{header, StatusCode, Uri};
     use serde_json::json;
     use wb_switch_core::modules::variant::WbVariant;
+
+    /// SPA 回退必须按**命中的文件**给 Content-Type：`/sessions` 这类前端路由曾按请求路径
+    /// 被标成 application/octet-stream，浏览器直接当文件下载、页面打不开（真机验收发现）。
+    #[tokio::test]
+    async fn spa_fallback_serves_html_content_type() {
+        for path in ["/", "/sessions", "/accounts"] {
+            let resp = static_handler(Uri::from_static(path)).await;
+            assert_eq!(resp.status(), StatusCode::OK, "{path}");
+            let content_type = resp
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or_default();
+            assert!(
+                content_type.starts_with("text/html"),
+                "{path} 的 Content-Type 应为 text/html，实际 {content_type}"
+            );
+        }
+    }
 
     /// 缺省档位必须与改造前一致（不传 variant 即国内版）。
     #[test]
