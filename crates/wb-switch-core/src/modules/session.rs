@@ -10,6 +10,8 @@
 //!   3) 云端映射：`~/.workbuddy/edge-sync-mapping-v{N}.db` edge_sync_mapping
 //!      （文件名版本号由客户端演进，按最大版本号动态发现）
 //!      （session_id=conversation_id，msg_channel=convmsg:{uid} 决定云端归属）
+//!      **不由本工具写入**：复制只写 1)、2)，映射行由 edge-sync 扩展在客户端下次
+//!      启动迁移副本时自行写入（预写会让客户端判定"已迁移"跳过上传，云端缺会话）。
 //!
 //! 复制收口（design §4）：所有复制入口统一走 [`copy_sessions_for_switch`]，在同一把
 //! 档位操作锁内先恢复未完成操作、再查询关联组；同一逻辑会话只保留一个有效副本，
@@ -34,7 +36,7 @@ use std::time::{Duration, Instant};
 
 use crate::modules::account;
 use crate::modules::auth_file;
-use crate::modules::config::{now_ms, now_secs, store_dir};
+use crate::modules::config::{now_ms, store_dir};
 use crate::modules::process;
 use crate::modules::session_backup::{
     self, BackupLifecycle, CleanupOutcome, CLEANUP_STATE_SAFE_TERMINATED,
@@ -680,81 +682,6 @@ fn verify_session_row(paths: &SessionPaths, new_cid: &str, target_uid: &str) -> 
 }
 
 /// 云端映射登记结果：失败必须上报，不能静默降级成成功。
-#[derive(Debug, Clone)]
-enum MappingOutcome {
-    Registered,
-    Unavailable(String),
-}
-
-/// 把新会话注册进 edge_sync_mapping（云端归属关键）。沿用既有登记方式，不扩大作用。
-fn register_edge_sync_mapping(
-    paths: &SessionPaths,
-    variant: WbVariant,
-    new_cid: &str,
-    target_uid: &str,
-) -> MappingOutcome {
-    let db_path = paths.edge_sync_db(variant);
-    if !db_path.is_file() {
-        return MappingOutcome::Unavailable(format!(
-            "云端映射库 {} 不存在",
-            db_path
-                .file_name()
-                .map(|name| name.to_string_lossy().to_string())
-                .unwrap_or_default()
-        ));
-    }
-    let Some(conn) = open_db(&db_path, false) else {
-        return MappingOutcome::Unavailable("云端映射库无法打开".to_string());
-    };
-    if !table_exists(&conn, "edge_sync_mapping") {
-        return MappingOutcome::Unavailable("云端映射库缺少 edge_sync_mapping 表".to_string());
-    }
-    if let Err(reason) = session_backup::ensure_full_synchronous(&conn) {
-        return MappingOutcome::Unavailable(reason);
-    }
-    let result = conn.execute(
-        "INSERT OR REPLACE INTO edge_sync_mapping \
-         (session_id, conversation_id, msg_channel, created_at) VALUES (?1, ?2, ?3, ?4)",
-        rusqlite::params![
-            new_cid,
-            new_cid,
-            format!("convmsg:{target_uid}"),
-            now_secs()
-        ],
-    );
-    match result {
-        Ok(_) => MappingOutcome::Registered,
-        Err(error) => MappingOutcome::Unavailable(format!("云端映射登记失败：{error}")),
-    }
-}
-
-/// 目标会话是否已按预期登记在云端映射表（恢复跳过重放时只核验，不 INSERT）。
-fn mapping_row_matches(
-    paths: &SessionPaths,
-    variant: WbVariant,
-    session_id: &str,
-    target_uid: &str,
-) -> bool {
-    let db_path = paths.edge_sync_db(variant);
-    if !db_path.is_file() {
-        return false;
-    }
-    let Some(conn) = open_db(&db_path, true) else {
-        return false;
-    };
-    if !table_exists(&conn, "edge_sync_mapping") {
-        return false;
-    }
-    let expected = format!("convmsg:{target_uid}");
-    conn.query_row(
-        "SELECT msg_channel FROM edge_sync_mapping WHERE session_id = ?1",
-        [session_id],
-        |row| row.get::<_, String>(0),
-    )
-    .ok()
-    .is_some_and(|channel| channel == expected)
-}
-
 /// 把勾选的会话复制到目标账号（路径 B）。返回复制报告。
 ///
 /// 档位以**目标账号**自身为准：数据根、数据库、备份目录、认证文件都取该档位。
@@ -1468,15 +1395,9 @@ fn finish_copy_from_body(
     verify_session_row(paths, &operation.target.session_id, &operation.target.uid)?;
     advance_operation(paths, operation, OpPhase::DbWritten)?;
 
-    match register_edge_sync_mapping(
-        paths,
-        variant,
-        &operation.target.session_id,
-        &operation.target.uid,
-    ) {
-        MappingOutcome::Registered => {}
-        MappingOutcome::Unavailable(reason) => return Err(reason),
-    }
+    // 云端登记交接给客户端：不预写 edge_sync_mapping——预写会让 edge-sync 扩展
+    // 判定"已迁移"而跳过上传，导致云端没有会话、后续 RENAME/ACTIVITY 404。
+    // 副本由客户端下次启动时自行迁移并写入映射行；阶段标记保留，语义为"已交接"。
     advance_operation(paths, operation, OpPhase::MappingWritten)?;
 
     let group_id = commit_links(paths, variant, operation, &snapshot.normalized)?;
@@ -3877,31 +3798,13 @@ fn recover_copy_operation(
         return needs(error, true);
     }
 
-    // 3) 云端映射：已越过该阶段就不再重新登记（恢复不重放已完成的阶段）；
-    // 但必须核验产物仍在，phase 写完、行却丢了时要报 needsRecovery，不能直接 Completed。
+    // 3) 云端登记已交接给客户端（不预写 edge_sync_mapping）：这里只推进阶段，
+    // 不写入、不核验映射行——该行由 edge-sync 扩展在客户端下次启动时写入，
+    // 工具恢复时不能要求它已存在，否则会误报 needsRecovery。
     if operation.phase < OpPhase::MappingWritten {
-        match register_edge_sync_mapping(
-            paths,
-            variant,
-            &operation.target.session_id,
-            &operation.target.uid,
-        ) {
-            MappingOutcome::Registered => {}
-            MappingOutcome::Unavailable(reason) => {
-                fail_operation(paths, &mut operation, &reason);
-                return needs(reason, true);
-            }
-        }
         if let Err(error) = advance_operation(paths, &mut operation, OpPhase::MappingWritten) {
             return needs(error, true);
         }
-    } else if !mapping_row_matches(
-        paths,
-        variant,
-        &operation.target.session_id,
-        &operation.target.uid,
-    ) {
-        return needs("云端映射丢失或被改动，已停止恢复".to_string(), false);
     }
 
     // 4) 关联与基线：已提交过就不再 commit_links，避免重复写关联存储与基线；
@@ -4645,7 +4548,7 @@ mod tests {
     // ---------------------------------------------------------------------------
 
     #[test]
-    fn copy_writes_body_row_mapping_and_link_group() {
+    fn copy_writes_body_row_and_link_group() {
         let env = ready_env("happy");
         let report = copy(&env, "uid-b", &["sess-1"]);
 
@@ -4673,16 +4576,8 @@ mod tests {
         assert_eq!(env.rows_for("uid-b"), vec![new_id.clone()]);
         assert_eq!(env.rows_for("uid-a"), vec!["sess-1".to_string()]);
 
-        // 云端映射沿用既有登记：convmsg:{target_uid}。
-        let conn = Connection::open(env.paths.edge_sync_db(WbVariant::Cn)).unwrap();
-        let channel: String = conn
-            .query_row(
-                "SELECT msg_channel FROM edge_sync_mapping WHERE session_id = ?1",
-                [&new_id],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(channel, "convmsg:uid-b");
+        // 不预写云端映射：登记交接给客户端（edge-sync 扩展迁移时自行写入）。
+        assert_eq!(env.mapping_rows(), 0, "复制不得预写映射行");
 
         // 关联组：同一逻辑会话、两个账号各一个 active 成员、一对基线。
         let store = env.store();
@@ -5233,47 +5128,22 @@ mod tests {
         assert_eq!(report["errors"][0]["error"], "源会话不属于当前账号，未复制");
     }
 
-    /// 映射登记失败 → 不报完整成功；修好后重试复用同一 UUID，不产生第二个副本。
+    /// 复制不再依赖云端映射库：库缺失也照常成功，不重建、不写行。
     #[test]
-    fn mapping_failure_keeps_pending_then_retry_reuses_same_uuid() {
-        let env = ready_env("mapping");
+    fn copy_succeeds_without_edge_sync_db() {
+        let env = ready_env("mapping-absent");
         std::fs::remove_file(env.paths.edge_sync_db(WbVariant::Cn)).unwrap();
 
-        let failed = copy(&env, "uid-b", &["sess-1"]);
-        assert_eq!(failed["copied"].as_array().unwrap().len(), 0);
-        let error = failed["errors"][0]["error"].as_str().unwrap();
-        assert!(error.contains("云端映射库"), "{error}");
-        assert_eq!(failed["needsRecovery"], true);
-        assert_eq!(
-            env.body_files().len(),
-            2,
-            "内容与数据库行已写入，未按成功处理"
+        let report = copy(&env, "uid-b", &["sess-1"]);
+        assert_eq!(report["copied"].as_array().unwrap().len(), 1);
+        assert!(report.get("errors").is_none(), "{report}");
+        assert_eq!(env.body_files().len(), 2);
+        assert_eq!(env.rows_for("uid-b").len(), 1);
+        assert!(
+            !env.paths().edge_sync_db(WbVariant::Cn).exists(),
+            "复制不得创建或写入映射库"
         );
-
-        let pending = session_link::pending_operations(&env.paths(), WbVariant::Cn);
-        assert_eq!(pending.len(), 1);
-        let new_id = pending[0].target.session_id.clone();
-        assert!(pending[0].phase < crate::modules::session_link::OpPhase::Completed);
-
-        // 映射库恢复后重试：恢复流程补齐，随后报告 alreadyLinked，UUID 不变。
-        env.create_edge_db(WbVariant::Cn);
-        let retry = copy(&env, "uid-b", &["sess-1"]);
-        assert_eq!(retry["copied"].as_array().unwrap().len(), 0);
-        assert_eq!(retry["alreadyLinked"][0]["sessionId"], new_id);
-        assert!(retry.get("errors").is_none());
         assert!(session_link::pending_operations(&env.paths(), WbVariant::Cn).is_empty());
-        assert_eq!(env.body_files().len(), 2, "恢复不得产生第二个副本");
-        assert_eq!(env.rows_for("uid-b"), vec![new_id.clone()]);
-
-        let conn = Connection::open(env.paths.edge_sync_db(WbVariant::Cn)).unwrap();
-        let channel: String = conn
-            .query_row(
-                "SELECT msg_channel FROM edge_sync_mapping WHERE session_id = ?1",
-                [&new_id],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(channel, "convmsg:uid-b");
     }
 
     /// 关联提交失败（存储目录不可写）→ 不报成功；恢复后同一 UUID 完成。
@@ -5535,13 +5405,18 @@ mod tests {
     #[test]
     fn recovery_stops_when_intermediate_body_was_modified() {
         let env = ready_env("recovery-stop");
-        std::fs::remove_file(env.paths.edge_sync_db(WbVariant::Cn)).unwrap();
-        let failed = copy(&env, "uid-b", &["sess-1"]);
-        assert_eq!(failed["needsRecovery"], true);
-        let new_id = session_link::pending_operations(&env.paths(), WbVariant::Cn)[0]
-            .target
-            .session_id
-            .clone();
+        let first = copy(&env, "uid-b", &["sess-1"]);
+        let new_id = env.first_copy_id(&first);
+        let paths = env.paths();
+
+        // 模拟"正文已写、后续阶段中断"：把已完成的操作日志回退到 BodyWritten。
+        let mut operation = session_link::scan_operations(&paths)
+            .operations
+            .into_iter()
+            .find(|operation| operation.target.session_id == new_id)
+            .expect("应能找到该副本的操作记录");
+        operation.phase = OpPhase::BodyWritten;
+        session_link::save_operation(&paths, &operation).unwrap();
 
         // 中间产物被其它程序改动 → 停止恢复，不覆盖。
         let tampered = format!(
@@ -5550,7 +5425,7 @@ mod tests {
         );
         std::fs::write(env.body_path(&new_id), &tampered).unwrap();
 
-        let report = recover_pending_session_operations_at(&env.paths(), WbVariant::Cn);
+        let report = recover_pending_session_operations_at(&paths, WbVariant::Cn);
         assert!(!report.is_clean());
         let issue = &report.needs_recovery[0];
         assert!(!issue.retryable);
@@ -5565,7 +5440,6 @@ mod tests {
         );
 
         // 该会话再次请求时不新建副本，而是报告未完成。
-        env.create_edge_db(WbVariant::Cn);
         let again = copy(&env, "uid-b", &["sess-1"]);
         assert_eq!(again["copied"].as_array().unwrap().len(), 0);
         assert_eq!(again["errors"].as_array().unwrap().len(), 1);
@@ -5576,23 +5450,19 @@ mod tests {
         assert_eq!(env.body_files().len(), 2, "不得产生第二个副本");
     }
 
+    /// 复制完成后再次请求同一会话：报告 alreadyLinked，不新建副本。
     #[test]
-    fn retry_after_partial_copy_does_not_duplicate() {
+    fn retry_after_completed_copy_does_not_duplicate() {
         let env = ready_env("partial-resume");
-        std::fs::remove_file(env.paths.edge_sync_db(WbVariant::Cn)).unwrap();
-        copy(&env, "uid-b", &["sess-1"]);
-        let body_count_after_failure = env.body_files().len();
+        let first = copy(&env, "uid-b", &["sess-1"]);
+        let new_id = env.first_copy_id(&first);
+        let body_count = env.body_files().len();
+        assert_eq!(body_count, 2);
 
-        // 未修复映射库就再次请求：不得新建副本。
         let again = copy(&env, "uid-b", &["sess-1"]);
         assert_eq!(again["copied"].as_array().unwrap().len(), 0);
-        assert_eq!(env.body_files().len(), body_count_after_failure);
-
-        // 修好后恢复完成。
-        env.create_edge_db(WbVariant::Cn);
-        let retry = copy(&env, "uid-b", &["sess-1"]);
-        assert_eq!(retry["alreadyLinked"].as_array().unwrap().len(), 1);
-        assert_eq!(env.body_files().len(), body_count_after_failure);
+        assert_eq!(again["alreadyLinked"][0]["sessionId"], new_id);
+        assert_eq!(env.body_files().len(), body_count, "不得产生第二个副本");
         assert_eq!(env.rows_for("uid-b").len(), 1);
     }
 
@@ -5634,7 +5504,7 @@ mod tests {
         );
         assert_eq!(after.groups[0].members.len(), members_before);
         assert_eq!(env.baseline_files(), baselines_before, "不得新增基线文件");
-        assert_eq!(env.mapping_rows(), 1, "不得重复登记云端映射");
+        assert_eq!(env.mapping_rows(), 0, "复制不再预写云端映射，恢复也不得补写");
         assert_eq!(env.body_files().len(), 2, "不得产生第二个副本");
         assert_eq!(env.rows_for("uid-b"), vec![new_id]);
         assert!(session_link::pending_operations(&paths, WbVariant::Cn).is_empty());
@@ -5675,48 +5545,6 @@ mod tests {
             session_link::pending_operations(&paths, WbVariant::Cn).len(),
             1,
             "必须保留未完成操作，不能标 Completed"
-        );
-    }
-
-    /// phase 已越过 MappingWritten，但映射行被删：不得跳过核验后标 Completed。
-    #[test]
-    fn recovery_stops_when_mapping_row_is_missing() {
-        let env = ready_env("recover-mapping-gone");
-        let first = copy(&env, "uid-b", &["sess-1"]);
-        let new_id = env.first_copy_id(&first);
-        let paths = env.paths();
-
-        let mut operation = session_link::scan_operations(&paths)
-            .operations
-            .into_iter()
-            .find(|operation| operation.target.session_id == new_id)
-            .expect("应能找到该副本的操作记录");
-        operation.phase = OpPhase::LinksCommitted;
-        session_link::save_operation(&paths, &operation).unwrap();
-
-        let conn = Connection::open(paths.edge_sync_db(WbVariant::Cn)).unwrap();
-        conn.execute(
-            "DELETE FROM edge_sync_mapping WHERE session_id = ?1",
-            [&new_id],
-        )
-        .unwrap();
-        drop(conn);
-
-        let revision_before = env.store().revision;
-        let report = recover_pending_session_operations_at(&paths, WbVariant::Cn);
-        assert!(report.recovered.is_empty(), "{:?}", report.recovered);
-        assert_eq!(report.needs_recovery.len(), 1);
-        assert!(!report.needs_recovery[0].retryable);
-        assert!(
-            report.needs_recovery[0].reason.contains("云端映射"),
-            "{}",
-            report.needs_recovery[0].reason
-        );
-        assert_eq!(env.store().revision, revision_before, "不得重写同步记录");
-        assert_eq!(env.mapping_rows(), 0, "不得悄悄补登记映射");
-        assert_eq!(
-            session_link::pending_operations(&paths, WbVariant::Cn).len(),
-            1
         );
     }
 
@@ -5890,47 +5718,6 @@ mod tests {
             .unwrap(),
             DbCopyOutcome::NoDb
         );
-    }
-
-    #[test]
-    fn register_edge_sync_mapping_reports_unavailable_reasons() {
-        let env = ready_env("edge-outcome");
-        // 缺表。
-        let db = temp_db("edge-no-table");
-        let conn = Connection::open(&db).unwrap();
-        conn.execute_batch("CREATE TABLE other (x INTEGER);")
-            .unwrap();
-        drop(conn);
-        let paths = SessionPaths {
-            store_root: env.root.join("s2"),
-            data_root: temp_db("edge-root"),
-            auth_file: env.root.join("auth2.info"),
-            link_namespace: LinkNamespace::WorkBuddy,
-        };
-        std::fs::create_dir_all(&paths.data_root).unwrap();
-        std::fs::copy(&db, paths.edge_sync_db(WbVariant::Cn)).unwrap();
-        assert!(matches!(
-            register_edge_sync_mapping(&paths, WbVariant::Cn, "new-1", "uid-b"),
-            MappingOutcome::Unavailable(_)
-        ));
-        let _ = std::fs::remove_file(&db);
-
-        // 正常登记。
-        assert!(matches!(
-            register_edge_sync_mapping(&env.paths(), WbVariant::Cn, "new-1", "uid-b"),
-            MappingOutcome::Registered
-        ));
-        let conn = Connection::open(env.paths.edge_sync_db(WbVariant::Cn)).unwrap();
-        let (sid, cid, channel): (String, String, String) = conn
-            .query_row(
-                "SELECT session_id, conversation_id, msg_channel FROM edge_sync_mapping",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-            )
-            .unwrap();
-        assert_eq!(sid, "new-1");
-        assert_eq!(cid, "new-1");
-        assert_eq!(channel, "convmsg:uid-b");
     }
 
     #[test]
@@ -6235,10 +6022,10 @@ mod tests {
         assert!(report.get("errors").is_none(), "{report}");
     }
 
-    /// 基础跨档复制（CN → AI）：正文按源工作区同名目录落到目标档，行/映射写目标档，
-    /// 关联组两个成员各记自己的档位。
+    /// 基础跨档复制（CN → AI）：正文按源工作区同名目录落到目标档，行写目标档、
+    /// 映射行交给客户端，关联组两个成员各记自己的档位。
     #[test]
-    fn cross_copy_lands_body_row_mapping_and_member_variants() {
+    fn cross_copy_lands_body_row_and_member_variants() {
         let env = CrossEnv::new("cn-to-ai");
         env.create_db(WbVariant::Cn, "");
         env.create_edge_db(WbVariant::Cn);
@@ -6276,11 +6063,8 @@ mod tests {
             vec!["sess-1".to_string()]
         );
 
-        // 映射行只写目标档。
-        assert_eq!(
-            env.mapping_rows(WbVariant::Ai),
-            vec![(new_id.clone(), "convmsg:uid-b".to_string())]
-        );
+        // 不预写映射行：云端登记交接给客户端，两档映射表都不应出现工具写入。
+        assert!(env.mapping_rows(WbVariant::Ai).is_empty());
         assert!(env.mapping_rows(WbVariant::Cn).is_empty());
 
         // 关联组：跨档组，两成员各记自己的档位。
@@ -6356,9 +6140,9 @@ mod tests {
         let new_id = report["copied"][0]["newId"].as_str().unwrap().to_string();
         assert!(env.body_path(WbVariant::Cn, &new_id).is_file());
         assert_eq!(env.rows_for(WbVariant::Cn, "uid-cn"), vec![new_id.clone()]);
-        assert_eq!(
-            env.mapping_rows(WbVariant::Cn),
-            vec![(new_id.clone(), "convmsg:uid-cn".to_string())]
+        assert!(
+            env.mapping_rows(WbVariant::Cn).is_empty(),
+            "复制不得预写映射行"
         );
 
         let store = match session_link::load_store(&env.paths(WbVariant::Cn)) {
@@ -6477,9 +6261,9 @@ mod tests {
             env.rows_for(WbVariant::Ai, "uid-b"),
             vec!["new-cross".to_string()]
         );
-        assert_eq!(
-            env.mapping_rows(WbVariant::Ai),
-            vec![("new-cross".to_string(), "convmsg:uid-b".to_string())]
+        assert!(
+            env.mapping_rows(WbVariant::Ai).is_empty(),
+            "恢复不得补写映射行"
         );
         let store = match session_link::load_store(&ai_paths) {
             StoreState::Ready(store) => store,
