@@ -260,6 +260,89 @@ export interface SessionSyncReport {
   temporaryFiles?: TemporaryFileInfo[];
 }
 
+// ---------------------------------------------------------------------------
+// Client-scoped session group directory
+// ---------------------------------------------------------------------------
+
+export type SessionGroupClient = "workbuddy" | "codebuddyIde" | "vscodeExt";
+export type SessionGroupStatus = "latest" | "behind" | "diverge" | "missing" | "unknown";
+export type SessionMemberVersionStatus = SessionGroupStatus | "stale" | "superseded";
+
+export interface SessionGroupSummary {
+  key: string;
+  client: SessionGroupClient;
+  variantScope: WbVariant | null;
+  groupId: string;
+  groupVariant: WbVariant;
+  title: string;
+  projectLabel: string;
+  latestActivityAt: number;
+  memberCount: number;
+  activeMemberCount: number;
+  accountNames: string[];
+  summaryStatus: SessionGroupStatus;
+  summaryText: string;
+  safeSourceMemberId: string | null;
+  hasSafeSource: boolean;
+}
+
+export interface SessionGroupMemberDetail {
+  memberId: string;
+  accountId: string | null;
+  uid: string;
+  sessionId: string;
+  accountName: string;
+  variant: WbVariant;
+  linkState: "active" | "stale" | "superseded";
+  versionStatus: SessionMemberVersionStatus;
+  title: string;
+  projectLabel: string;
+  updatedAt: number;
+  recordCount: number | null;
+  contentState: "ready" | "missing" | "unavailable";
+  reason: string;
+  canBeSource: boolean;
+}
+
+export interface SessionGroupList {
+  client: SessionGroupClient;
+  variantScope: WbVariant | null;
+  storeStatus: "missing" | "ready" | "unavailable";
+  storeError?: string;
+  groups: SessionGroupSummary[];
+}
+
+export interface SessionGroupDetail extends SessionGroupSummary {
+  members: SessionGroupMemberDetail[];
+  addTargets: AccountMeta[];
+}
+
+export interface SessionGroupPairPreview {
+  client: SessionGroupClient;
+  variantScope: WbVariant | null;
+  groupId: string;
+  sourceMemberId: string;
+  targetMemberId: string;
+  verdict: SessionSyncVerdict;
+  availableModes: SessionSyncMode[];
+  previewToken: string | null;
+  reason: string;
+  recordCount: { source: number; target: number; baseline: number | null } | null;
+  extraTargetCount: number;
+}
+
+export interface SessionGroupActionReport {
+  client: SessionGroupClient;
+  groupId: string;
+  sourceMemberId?: string;
+  targetMemberId?: string;
+  synced: SessionSyncResultItem[];
+  skipped: SessionSyncSkippedItem[];
+  errors: { groupId?: string; error: string }[];
+  needsRecovery?: boolean;
+  temporaryFiles?: TemporaryFileInfo[];
+}
+
 /**
  * 应用内通知存档条目：toast 只存活几秒，这里保存最近 100 条供事后回看
  * （支持排障与验收核对，例如切号成功后到底提示了什么）。
@@ -894,4 +977,3 @@ export interface VscodeSessionList {
    */
   dataRoot?: string | null;
 }
-

@@ -32,6 +32,11 @@ import type {
   SessionLinksPreview,
   SessionSyncReport,
   SessionSyncSelection,
+  SessionGroupClient,
+  SessionGroupList,
+  SessionGroupDetail,
+  SessionGroupPairPreview,
+  SessionGroupActionReport,
   SwitchResult,
   TravelConfig,
   TravelStatus,
@@ -56,7 +61,7 @@ import { screenshotDemoResponse } from "./screenshot-demo";
 const API_BASE = "http://127.0.0.1:57890";
 
 const DEMO_READ_COMMANDS = new Set([
-  "get_status", "get_accounts", "get_codebuddy_cli_status", "get_codebuddy_cn_ide_status", "get_codebuddy_ide_status", "get_vscode_ext_status", "get_jetbrains_status", "list_vscode_sessions", "list_codebuddy_ide_sessions", "list_codebuddy_intl_ide_sessions", "vscode_session_links_preview", "codebuddy_ide_session_links_preview", "codebuddy_intl_ide_session_links_preview", "account_sessions", "session_links_preview_cross", "get_checkin_status",
+  "get_status", "get_accounts", "get_codebuddy_cli_status", "get_codebuddy_cn_ide_status", "get_codebuddy_ide_status", "get_vscode_ext_status", "get_jetbrains_status", "list_vscode_sessions", "list_codebuddy_ide_sessions", "list_codebuddy_intl_ide_sessions", "vscode_session_links_preview", "codebuddy_ide_session_links_preview", "codebuddy_intl_ide_session_links_preview", "account_sessions", "session_links_preview_cross", "list_session_groups", "get_session_group", "preview_session_group_pair", "get_checkin_status",
   "get_credit_expiry", "get_credit_statistics", "get_auto_checkin_config",
   "get_token_statistics",
   "get_checkin_logs", "get_auto_rotate_config", "rotate_status", "get_rotate_logs",
@@ -143,6 +148,12 @@ const ROUTES: Record<string, Route> = {
   session_links_preview: { method: "POST", path: "/api/session-links/preview" },
   session_links_preview_cross: { method: "POST", path: "/api/session-links/preview-cross" },
   session_sync_cross: { method: "POST", path: "/api/session-sync/cross" },
+  list_session_groups: { method: "POST", path: "/api/session-groups/list" },
+  get_session_group: { method: "POST", path: "/api/session-groups/detail" },
+  preview_session_group_pair: { method: "POST", path: "/api/session-groups/preview" },
+  sync_session_group_pair: { method: "POST", path: "/api/session-groups/sync" },
+  sync_session_group_safe_batch: { method: "POST", path: "/api/session-groups/sync-safe" },
+  add_session_group_member: { method: "POST", path: "/api/session-groups/add" },
   get_checkin_status: { method: "GET", path: "/api/checkin/status" },
   get_credit_expiry: { method: "POST", path: "/api/credits" },
   get_credit_statistics: { method: "GET", path: "/api/credits/stats" },
@@ -583,6 +594,53 @@ export function sessionSyncCross(
   syncSelections: SessionSyncSelection[],
 ): Promise<SessionSyncReport> {
   return call("session_sync_cross", { sourceAccountId, targetAccountId, syncSelections });
+}
+
+export function listSessionGroups(client: SessionGroupClient, variantScope?: WbVariant): Promise<SessionGroupList> {
+  return call("list_session_groups", { client, ...(variantScope ? { variantScope } : {}) });
+}
+
+export function getSessionGroup(client: SessionGroupClient, groupId: string, variantScope?: WbVariant): Promise<SessionGroupDetail> {
+  return call("get_session_group", { client, groupId, ...(variantScope ? { variantScope } : {}) });
+}
+
+export function previewSessionGroupPair(args: {
+  client: SessionGroupClient;
+  groupId: string;
+  sourceMemberId: string;
+  targetMemberId: string;
+  variantScope?: WbVariant;
+}): Promise<SessionGroupPairPreview> {
+  return call("preview_session_group_pair", args as unknown as Record<string, unknown>);
+}
+
+export function syncSessionGroupPair(args: {
+  client: SessionGroupClient;
+  groupId: string;
+  sourceMemberId: string;
+  targetMemberId: string;
+  previewToken: string;
+  mode: "fastForward" | "overwrite";
+  variantScope?: WbVariant;
+}): Promise<SessionGroupActionReport> {
+  if (demoModeEnabled) return Promise.reject(new Error(DEMO_UNAVAILABLE_MESSAGE));
+  return call("sync_session_group_pair", args as unknown as Record<string, unknown>);
+}
+
+export function syncSessionGroupSafeBatch(client: SessionGroupClient, groupId: string, variantScope?: WbVariant): Promise<SessionGroupActionReport> {
+  if (demoModeEnabled) return Promise.reject(new Error(DEMO_UNAVAILABLE_MESSAGE));
+  return call("sync_session_group_safe_batch", { client, groupId, ...(variantScope ? { variantScope } : {}) });
+}
+
+export function addSessionGroupMember(args: {
+  client: SessionGroupClient;
+  groupId: string;
+  sourceMemberId: string;
+  targetAccountId: string;
+  variantScope?: WbVariant;
+}): Promise<{ status: "linked" | "alreadyLinked" | "copiedUnlinked" | "failed"; [key: string]: unknown }> {
+  if (demoModeEnabled) return Promise.reject(new Error(DEMO_UNAVAILABLE_MESSAGE));
+  return call("add_session_group_member", args as unknown as Record<string, unknown>);
 }
 
 /** 打开系统设置授权面板（桌面端专用；webui 模式由服务进程权限决定，无操作）。 */

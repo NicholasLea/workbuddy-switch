@@ -2,7 +2,7 @@ import type {
   AccountMeta, AppStatus, AutoRotateConfig, CheckinConfig, CheckinLog,
   CodeBuddyCliStatus, CodeBuddyCliSwitchResult, CodeBuddyCnIdeStatus, CreditExpiry, CreditOfficialUsageModel, CreditStatistics,
   GithubConfig, RateLimitHookStatus, RateLimitsPayload, RotateLog, RotateStatus, TokenStatistics, TokenStatsGroup, TokenStatsRequestRow, TokenStatsSource, TokenStatsTotals,
-  Session, SessionLinkPreviewGroup, SessionLinksPreview, SessionSyncVerdict, TravelConfig, TravelStatus, VscodeExtStatus, VscodeSessionList,
+  Session, SessionLinkPreviewGroup, SessionLinksPreview, SessionSyncVerdict, SessionGroupClient, SessionGroupSummary, SessionGroupDetail, SessionGroupList, SessionGroupPairPreview, SessionMemberVersionStatus, TravelConfig, TravelStatus, VscodeExtStatus, VscodeSessionList,
 } from "./types";
 import { demoModeEnabled } from "./demo-mode";
 import { accountVariant, normalizeVariant, variantSupportsCheckin } from "./variant";
@@ -646,6 +646,84 @@ function demoPreviewGroup(
   };
 }
 
+function buildDemoSessionGroups(
+  client: SessionGroupClient,
+  scope: "cn" | "ai" | null,
+  allAccounts: AccountMeta[],
+): SessionGroupDetail[] {
+  const candidates = allAccounts.filter((account) => {
+    if (client === "codebuddyIde") return accountVariant(account) === scope;
+    return true;
+  });
+  const memberAccounts = candidates.length > 0 ? candidates : allAccounts.slice(0, 2);
+  const scenario = [
+    { title: "跨档复制内核改造", status: "behind" as const, count: 2 },
+    { title: "会话筛选和分页", status: "latest" as const, count: 3 },
+    { title: "整理长时间未完成的任务", status: "diverge" as const, count: 2 },
+    { title: "恢复后历史会话索引", status: "missing" as const, count: 2 },
+  ];
+  return scenario.map((item, groupIndex) => {
+    const groupId = `demo-${client}-${scope ?? "all"}-${groupIndex + 1}`;
+    const selectedAccounts = Array.from({ length: Math.min(item.count, memberAccounts.length) }, (_, index) => memberAccounts[index]);
+    const members = selectedAccounts.map((account, memberIndex) => {
+      let versionStatus: SessionMemberVersionStatus = "latest";
+      let contentState: "ready" | "missing" | "unavailable" = "ready";
+      let reason = "内容与操作来源一致";
+      if (item.status === "behind" && memberIndex > 0) {
+        versionStatus = "behind";
+        reason = "目标账号没有独有改动，来源账号新增 3 条，可以安全同步";
+      } else if (item.status === "diverge") {
+        versionStatus = "diverge";
+        reason = "双方都有更新；覆盖会替换目标账号的完整内容";
+      } else if (item.status === "missing" && memberIndex > 0) {
+        versionStatus = "missing";
+        contentState = "missing";
+        reason = "目标会话正文不存在，无法确认或同步";
+      }
+      return {
+        memberId: `${groupId}-member-${memberIndex + 1}`,
+        accountId: account.id,
+        uid: account.uid ?? `demo-uid-${memberIndex}`,
+        sessionId: `${groupId}-session-${memberIndex + 1}`,
+        accountName: account.nickname || account.email || account.uid || "演示账号",
+        variant: accountVariant(account),
+        linkState: "active" as const,
+        versionStatus,
+        title: item.title,
+        projectLabel: client === "workbuddy" ? "项目 wb-switch" : "工作区 3c1f8a92",
+        updatedAt: Date.now() - (memberIndex + groupIndex * 2) * 1000 * 60 * 37,
+        recordCount: contentState === "ready" ? (item.status === "latest" ? 14 : Math.max(4, 14 - memberIndex * 3)) : null,
+        contentState,
+        reason,
+        canBeSource: contentState === "ready",
+      };
+    });
+    const summary: SessionGroupSummary = {
+      key: `${client}:${scope ?? "all"}:${groupId}`,
+      client,
+      variantScope: scope,
+      groupId,
+      groupVariant: scope ?? members[0].variant,
+      title: item.title,
+      projectLabel: members[0].projectLabel,
+      latestActivityAt: Math.max(...members.map((member) => member.updatedAt)),
+      memberCount: members.length,
+      activeMemberCount: members.length,
+      accountNames: members.map((member) => member.accountName),
+      summaryStatus: item.status,
+      summaryText: item.status === "behind" ? "有副本落后，可安全同步" : item.status === "latest" ? "关联副本内容一致" : item.status === "diverge" ? "多个副本有不同更新，需要选择来源" : "有副本内容缺失",
+      safeSourceMemberId: item.status === "behind" || item.status === "latest" ? members[0].memberId : null,
+      hasSafeSource: item.status === "behind" || item.status === "latest",
+    };
+    const linkedAccountIds = new Set(members.map((member) => member.accountId));
+    return {
+      ...summary,
+      members,
+      addTargets: candidates.filter((account) => !linkedAccountIds.has(account.id)),
+    };
+  });
+}
+
 /** Read-only demo response provider. It never reads or mutates real user data. */
 export function screenshotDemoResponse(command: string, args?: Record<string, unknown>): unknown {
   const demoAccounts = hydratedAccounts();
@@ -656,6 +734,9 @@ export function screenshotDemoResponse(command: string, args?: Record<string, un
   const config = rotateConfig();
   const rotateStatus: RotateStatus = { config, cliConfigured: true, activeAccountId: demoAccounts[0].id, activeAccountName: demoAccounts[0].nickname, lastCheckAt: atLocalTime(0, 9, 30), lastSwitchAt: atLocalTime(1, 16, 20) };
   const githubConfig: GithubConfig = { owner: "zhangjia", repo: "wb-switch", proxy: "" };
+  const groupClient = args?.client as SessionGroupClient | undefined;
+  const groupScope = args?.variantScope === "ai" ? "ai" : args?.variantScope === "cn" ? "cn" : null;
+  const demoGroups = groupClient ? buildDemoSessionGroups(groupClient, groupScope, demoAccounts) : [];
   switch (command) {
     // 档位随请求回显：两个档位各有一套演示账号，国际版同样回显「运行中 + 当前账号」。
     case "get_status": {
@@ -681,6 +762,47 @@ export function screenshotDemoResponse(command: string, args?: Record<string, un
         current: account.uid ?? "demo-uid",
         variant: accountVariant(account),
       };
+    }
+    case "list_session_groups": {
+      if (!groupClient || (groupClient === "codebuddyIde" && !groupScope) || (groupClient !== "codebuddyIde" && groupScope)) {
+        throw new Error("会话客户端或档位参数无效");
+      }
+      const groups = demoGroups.map(({ members: _members, addTargets: _targets, ...summary }) => summary);
+      return { client: groupClient, variantScope: groupScope, storeStatus: "ready", groups } satisfies SessionGroupList;
+    }
+    case "get_session_group": {
+      if (!groupClient || (groupClient === "codebuddyIde" && !groupScope) || (groupClient !== "codebuddyIde" && groupScope)) {
+        throw new Error("会话客户端或档位参数无效");
+      }
+      const groupId = String(args?.groupId ?? "");
+      const selected = demoGroups.find((group) => group.groupId === groupId);
+      if (!selected) throw new Error("演示会话组不存在");
+      return selected satisfies SessionGroupDetail;
+    }
+    case "preview_session_group_pair": {
+      if (!groupClient || (groupClient === "codebuddyIde" && !groupScope) || (groupClient !== "codebuddyIde" && groupScope)) {
+        throw new Error("会话客户端或档位参数无效");
+      }
+      const group = demoGroups.find((item) => item.groupId === args?.groupId);
+      const sourceMemberId = String(args?.sourceMemberId ?? "");
+      const targetMemberId = String(args?.targetMemberId ?? "");
+      const source = group?.members.find((member) => member.memberId === sourceMemberId);
+      const target = group?.members.find((member) => member.memberId === targetMemberId);
+      if (!group || !source || !target || sourceMemberId === targetMemberId) throw new Error("来源或目标成员无效");
+      const verdict = target.versionStatus === "behind" ? "fastForward" : target.versionStatus === "diverge" ? "diverge" : target.versionStatus === "missing" || target.versionStatus === "unknown" ? "unknown" : "identical";
+      return {
+        client: groupClient,
+        variantScope: groupScope,
+        groupId: group.groupId,
+        sourceMemberId,
+        targetMemberId,
+        verdict,
+        availableModes: verdict === "fastForward" ? ["fastForward"] : verdict === "diverge" ? ["overwrite"] : [],
+        previewToken: verdict === "fastForward" || verdict === "diverge" ? `demo-preview-${group.groupId}-${targetMemberId}` : null,
+        reason: target.reason,
+        recordCount: { source: source.recordCount ?? 0, target: target.recordCount ?? 0, baseline: null },
+        extraTargetCount: verdict === "diverge" ? 2 : 0,
+      } satisfies SessionGroupPairPreview;
     }
     case "get_codebuddy_cli_status": return cliStatus;
     // 让演示里存在一个「CodeBuddy IDE 当前账号」：否则 IDE 标记与选中态染色（淡紫）在演示里永远不可见。
