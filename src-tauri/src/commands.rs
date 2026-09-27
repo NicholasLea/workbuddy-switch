@@ -688,6 +688,29 @@ pub async fn session_links_preview(
     .map_err(|e| e.to_string())?
 }
 
+/// POST /api/session-links/preview-cross —— 预览「显式来源账号 → 显式目标账号」（跨档支持）。
+///
+/// 与 `session_links_preview` 同形，多一个 `sourceAccountId`；成员内容按成员自身档位读取。
+#[tauri::command(rename_all = "camelCase")]
+pub async fn session_links_preview_cross(
+    source_account_id: String,
+    target_account_id: String,
+) -> Result<Value, String> {
+    if source_account_id.trim().is_empty() {
+        return Err("缺少 sourceAccountId".to_string());
+    }
+    if target_account_id.trim().is_empty() {
+        return Err("缺少 targetAccountId".to_string());
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let source = account::find_account(&source_account_id).ok_or("源账号不存在")?;
+        let target = account::find_account(&target_account_id).ok_or("目标账号不存在")?;
+        session::session_links_preview_cross(&source, &target)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 // ---------------------------------------------------------------------------
 // 阶段 3：签到 + token 刷新
 // ---------------------------------------------------------------------------

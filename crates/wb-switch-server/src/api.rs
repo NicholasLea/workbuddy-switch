@@ -130,6 +130,10 @@ pub fn router() -> Router {
             "/api/session-links/preview",
             post(api_session_links_preview),
         )
+        .route(
+            "/api/session-links/preview-cross",
+            post(api_session_links_preview_cross),
+        )
         .route("/api/checkin/status", get(api_checkin_status))
         .route("/api/credits", post(api_credits))
         .route("/api/credits/stats", get(api_credit_statistics))
@@ -944,6 +948,36 @@ async fn api_session_links_preview(Json(body): Json<Value>) -> Response {
         None => account::variant_of(&target),
     };
     match session::session_links_preview(variant, &target) {
+        Ok(report) => json_ok(report),
+        Err(error) => json_err(error, StatusCode::BAD_REQUEST),
+    }
+}
+
+/// POST /api/session-links/preview-cross —— 预览「显式来源账号 → 显式目标账号」（跨档支持）。
+///
+/// 与 `POST /api/session-links/preview` 同形，多一个 `sourceAccountId`；
+/// 成员内容按成员自身档位读取（跨档组的源读源档、目标读目标档）。
+async fn api_session_links_preview_cross(Json(body): Json<Value>) -> Response {
+    let source_account_id = body
+        .get("sourceAccountId")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let target_account_id = body
+        .get("targetAccountId")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    if source_account_id.trim().is_empty() {
+        return json_err("缺少 sourceAccountId".to_string(), StatusCode::BAD_REQUEST);
+    }
+    let Some(source) = account::find_account(&source_account_id) else {
+        return json_err("源账号不存在".to_string(), StatusCode::BAD_REQUEST);
+    };
+    let Some(target) = account::find_account(&target_account_id) else {
+        return json_err("目标账号不存在".to_string(), StatusCode::BAD_REQUEST);
+    };
+    match session::session_links_preview_cross(&source, &target) {
         Ok(report) => json_ok(report),
         Err(error) => json_err(error, StatusCode::BAD_REQUEST),
     }

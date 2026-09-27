@@ -1883,7 +1883,116 @@ fn session_links_preview_at(
                         && has_member_for(group, &source_uid)
                         && has_member_for(group, &target_uid)
                 })
-                .map(|group| preview_group_item(paths, group, &source_uid, &target_uid))
+                .map(|group| {
+                    let fixed_paths = |_: &LinkGroup, _: &LinkMember| paths.clone();
+                    preview_group_item(paths, &fixed_paths, group, &source_uid, &target_uid)
+                })
+                .collect();
+            report["groups"] = json!(groups);
+        }
+    }
+    Ok(report)
+}
+
+/// 预览「显式来源账号 → 显式目标账号」可同步的关联组（会话管理页用；跨档支持）。
+///
+/// 与 [`session_links_preview`] 的差异只在来源判定：源 uid 取自 `source_acc`，
+/// 不再从登录态读取；成员内容与行按**成员自身档位**读取（跨档组：源读源档、
+/// 目标读目标档），关联存储与基线共享。
+pub fn session_links_preview_cross(
+    source_acc: &Value,
+    target_acc: &Value,
+) -> Result<Value, String> {
+    let source_variant = account::variant_of(source_acc);
+    let target_variant = account::variant_of(target_acc);
+    session_links_preview_cross_at(
+        &SessionPaths::for_variant(source_variant),
+        source_variant,
+        source_acc,
+        &SessionPaths::for_variant(target_variant),
+        target_variant,
+        target_acc,
+        SessionPaths::for_variant,
+    )
+}
+
+/// [`session_links_preview_cross`] 的可注入版本（单测注入临时双档目录与解析器）。
+fn session_links_preview_cross_at(
+    source_paths: &SessionPaths,
+    source_variant: WbVariant,
+    source_acc: &Value,
+    target_paths: &SessionPaths,
+    target_variant: WbVariant,
+    target_acc: &Value,
+    resolve_source_paths: impl Fn(WbVariant) -> SessionPaths,
+) -> Result<Value, String> {
+    let source_uid = account_uid(source_acc);
+    if source_uid.is_empty() {
+        return Err("来源账号缺少 uid，无法预览会话".to_string());
+    }
+    let target_uid = account_uid(target_acc);
+    if target_uid.is_empty() {
+        return Err("目标账号缺少 uid，无法同步会话".to_string());
+    }
+    if source_variant == target_variant && source_uid == target_uid {
+        return Err("来源账号与目标账号相同，无需同步会话".to_string());
+    }
+    // 能力探测与复制同口径：成员数据根只有国际版需要同构检查（读也依赖）。
+    let mut supported = true;
+    for (paths, variant) in [
+        (source_paths, source_variant),
+        (target_paths, target_variant),
+    ] {
+        if variant == WbVariant::Ai && !session_copy_supported_at(&paths.data_root) {
+            supported = false;
+        }
+    }
+
+    let mut report = json!({
+        "supported": supported,
+        "sourceUid": source_uid,
+        "targetUid": target_uid,
+        "groups": [],
+    });
+    // 跨档预览在报告里带两侧档位；同档报告保持原字段（与现有入口逐字兼容）。
+    if source_variant != target_variant {
+        report["sourceVariant"] = json!(source_variant.as_str());
+        report["targetVariant"] = json!(target_variant.as_str());
+    }
+    if !supported {
+        report["storeStatus"] = json!("unsupported");
+        return Ok(report);
+    }
+    // 关联存储与基线共享；用目标档路径承载（同档时两者相同）。
+    match session_link::load_store(target_paths) {
+        StoreState::Missing => report["storeStatus"] = json!("missing"),
+        StoreState::Unavailable(reason) => {
+            report["storeStatus"] = json!("unavailable");
+            report["storeError"] = json!(reason);
+        }
+        StoreState::Ready(store) => {
+            report["storeStatus"] = json!("ready");
+            // 成员数据根：与请求两侧同档的成员直接用请求路径（含单测注入），
+            // 其它档位（历史组）按解析器解析，避免误读。
+            let member_paths = |group: &LinkGroup, member: &LinkMember| -> SessionPaths {
+                let variant = session_link::member_variant(group, member);
+                if variant == source_variant {
+                    source_paths.clone()
+                } else if variant == target_variant {
+                    target_paths.clone()
+                } else {
+                    resolve_source_paths(variant)
+                }
+            };
+            let groups: Vec<Value> = store
+                .groups
+                .iter()
+                .filter(|group| {
+                    has_member_for(group, &source_uid) && has_member_for(group, &target_uid)
+                })
+                .map(|group| {
+                    preview_group_item(target_paths, &member_paths, group, &source_uid, &target_uid)
+                })
                 .collect();
             report["groups"] = json!(groups);
         }
@@ -1894,8 +2003,11 @@ fn session_links_preview_at(
 /// 单个关联组的预览项。
 ///
 /// 记录数与差集只用于向用户解释；能否勾选只由判定结果决定（design §3.2）。
+/// `member_paths` 解析成员所在档位的数据根：同档恒为同一份，跨档按成员档位
+/// （源读源档、目标读目标档）；关联存储与基线与档位无关，统一走 `store_paths`。
 fn preview_group_item(
-    paths: &SessionPaths,
+    store_paths: &SessionPaths,
+    member_paths: &dyn Fn(&LinkGroup, &LinkMember) -> SessionPaths,
     group: &LinkGroup,
     source_uid: &str,
     target_uid: &str,
@@ -1904,7 +2016,10 @@ fn preview_group_item(
     let target_any = group.members.iter().find(|member| member.uid == target_uid);
     // 组展示名取来源会话（同步保留目标的 sessionId、标题与自定义标题）。
     let (title, cwd) = source_any
-        .and_then(|member| session_row_info(paths, &member.session_id))
+        .and_then(|member| {
+            let paths = member_paths(group, member);
+            session_row_info(&paths, &member.session_id)
+        })
         .unwrap_or_else(|| ("(无标题)".to_string(), String::new()));
     let source_summary = member_summary(source_any);
     let target_summary = member_summary(target_any);
@@ -1933,16 +2048,18 @@ fn preview_group_item(
         });
     };
 
+    let source_paths = member_paths(group, source_member);
+    let target_paths = member_paths(group, target_member);
     let baseline = session_link::load_pair_baseline(
-        paths,
+        store_paths,
         group,
         &source_member.member_id,
         &target_member.member_id,
     );
-    let source_content = member_content_state(paths, &source_member.session_id);
-    let target_content = member_content_state(paths, &target_member.session_id);
-    let rows_match =
-        member_row_owned_by(paths, source_member) && member_row_owned_by(paths, target_member);
+    let source_content = member_content_state(&source_paths, &source_member.session_id);
+    let target_content = member_content_state(&target_paths, &target_member.session_id);
+    let rows_match = member_row_owned_by(&source_paths, source_member)
+        && member_row_owned_by(&target_paths, target_member);
     let decision = if rows_match {
         session_link::decide_sync(&source_content, &target_content, &baseline)
     } else {
@@ -1987,7 +2104,7 @@ fn preview_group_item(
             &baseline,
             decision.verdict,
         );
-        match session_link::save_preview_token(paths, binding) {
+        match session_link::save_preview_token(store_paths, binding) {
             Ok(preview_id) => item["previewToken"] = json!(preview_id),
             Err(error) => {
                 // 绑定存不下来就不能让用户勾选：不给出可执行动作，并说明原因。
@@ -5767,6 +5884,12 @@ mod tests {
                 .flatten()
                 .collect()
         }
+
+        fn delete_session(&self, variant: WbVariant, id: &str) {
+            let conn = Connection::open(self.paths(variant).workbuddy_db()).unwrap();
+            conn.execute("DELETE FROM sessions WHERE id = ?1", [id])
+                .unwrap();
+        }
     }
 
     impl Drop for CrossEnv {
@@ -6067,6 +6190,124 @@ mod tests {
                 .variant,
             Some(WbVariant::Cn)
         );
+    }
+
+    /// 跨档预览：复制建组后判 identical；源追加 → fastForward；两边分别追加 → diverge；
+    /// 源行删除 → unknown。内容与标题按成员档位读取（源读 CN、目标读 AI）。
+    #[test]
+    fn cross_preview_verdicts_follow_member_content() {
+        let env = CrossEnv::new("preview");
+        env.create_db(WbVariant::Cn, "");
+        env.create_edge_db(WbVariant::Cn);
+        env.create_db(WbVariant::Ai, "");
+        env.create_edge_db(WbVariant::Ai);
+        env.add_session(WbVariant::Cn, "sess-1", "uid-a", "标题一");
+        env.add_body(WbVariant::Cn, "sess-1", &body_text("sess-1"));
+
+        let source_paths = env.paths(WbVariant::Cn);
+        let target_paths = env.paths(WbVariant::Ai);
+        let source_acc = json!({"id": "acc-uid-a", "uid": "uid-a", "variant": "cn"});
+        let target_acc = json!({"id": "acc-uid-b", "uid": "uid-b", "variant": "ai"});
+        let preview = || {
+            session_links_preview_cross_at(
+                &source_paths,
+                WbVariant::Cn,
+                &source_acc,
+                &target_paths,
+                WbVariant::Ai,
+                &target_acc,
+                |variant| env.paths(variant),
+            )
+            .unwrap()
+        };
+
+        // 复制建组：CN → AI（正文落在目标档同名工作区目录）。
+        let report = cross_copy(
+            &env,
+            WbVariant::Cn,
+            "uid-a",
+            WbVariant::Ai,
+            "uid-b",
+            &["sess-1"],
+        );
+        let new_id = report["copied"][0]["newId"].as_str().unwrap().to_string();
+
+        // 复制完成即一致；报告带两侧档位，标题取自源档。
+        let first = preview();
+        assert_eq!(first["sourceVariant"], "cn");
+        assert_eq!(first["targetVariant"], "ai");
+        assert_eq!(first["storeStatus"], "ready");
+        assert_eq!(first["groups"][0]["verdict"], "identical");
+        assert_eq!(first["groups"][0]["title"], "标题一");
+        assert_eq!(first["groups"][0]["source"]["sessionId"], "sess-1");
+        assert_eq!(first["groups"][0]["target"]["sessionId"], new_id.as_str());
+
+        // 源追加 3 条 → fastForward（extraA=3），给出可执行的 previewToken。
+        append_records(&env.body_path(WbVariant::Cn, "sess-1"), "sess-1", 2, 3);
+        let second = preview();
+        let item = &second["groups"][0];
+        assert_eq!(item["verdict"], "fastForward");
+        assert_eq!(item["extraA"], 3);
+        assert_eq!(item["extraB"], 0);
+        assert_eq!(item["defaultChecked"], true);
+        assert_eq!(item["recordCount"]["source"], 5);
+        assert_eq!(item["recordCount"]["target"], 2);
+        assert!(item["previewToken"]
+            .as_str()
+            .is_some_and(|token| !token.is_empty()));
+
+        // 目标追加自己独有的 2 条 → diverge（两边各有独有内容，只能显式覆盖）。
+        append_records(&env.body_path(WbVariant::Ai, &new_id), &new_id, 100, 2);
+        let third = preview();
+        let item = &third["groups"][0];
+        assert_eq!(item["verdict"], "diverge");
+        assert_eq!(item["extraA"], 3);
+        assert_eq!(item["extraB"], 2);
+        assert_eq!(item["availableModes"][0], "overwrite");
+
+        // 源行删除 → 成员失效，判定 unknown 且不可执行。
+        env.delete_session(WbVariant::Cn, "sess-1");
+        let fourth = preview();
+        let item = &fourth["groups"][0];
+        assert_eq!(item["verdict"], "unknown");
+        assert_eq!(item["defaultChecked"], false);
+        assert!(item["availableModes"].as_array().unwrap().is_empty());
+        assert!(item.get("previewToken").is_none());
+    }
+
+    /// 跨档预览入口也覆盖同档组（两个国内版账号）：判定路径一致，报告不带档位字段。
+    #[test]
+    fn cross_preview_supports_same_variant_groups() {
+        let env = CrossEnv::new("preview-same");
+        env.create_db(WbVariant::Cn, "");
+        env.create_edge_db(WbVariant::Cn);
+        env.add_session(WbVariant::Cn, "sess-1", "uid-a", "标题一");
+        env.add_body(WbVariant::Cn, "sess-1", &body_text("sess-1"));
+
+        cross_copy(
+            &env,
+            WbVariant::Cn,
+            "uid-a",
+            WbVariant::Cn,
+            "uid-b",
+            &["sess-1"],
+        );
+
+        let paths = env.paths(WbVariant::Cn);
+        let source_acc = json!({"id": "acc-uid-a", "uid": "uid-a", "variant": "cn"});
+        let target_acc = json!({"id": "acc-uid-b", "uid": "uid-b", "variant": "cn"});
+        let report = session_links_preview_cross_at(
+            &paths,
+            WbVariant::Cn,
+            &source_acc,
+            &paths,
+            WbVariant::Cn,
+            &target_acc,
+            |variant| env.paths(variant),
+        )
+        .unwrap();
+        assert!(report.get("sourceVariant").is_none());
+        assert_eq!(report["groups"][0]["verdict"], "identical");
     }
 
     // ---------------------------------------------------------------------------
