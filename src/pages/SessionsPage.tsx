@@ -238,7 +238,7 @@ export default function SessionsPage() {
         });
       }
     } catch (cause) {
-      toast.error("会话复制失败", { description: withClientHint(api.asError(cause)) });
+      toast.error("会话复制失败", { description: api.asError(cause) });
     } finally {
       setCopying(false);
     }
@@ -275,7 +275,7 @@ export default function SessionsPage() {
         const label = (groupId?: string) => (groupId && titleByGroupId.get(groupId)) || groupId || "会话";
         toast.error("部分会话同步失败", {
           description: errors
-            .map((item) => `${label(item.groupId)}：${withClientHint(item.error)}`)
+            .map((item) => `${label(item.groupId)}：${item.error}`)
             .join("；"),
         });
       }
@@ -286,7 +286,7 @@ export default function SessionsPage() {
         });
       }
     } catch (cause) {
-      toast.error("会话同步失败", { description: withClientHint(api.asError(cause)) });
+      toast.error("会话同步失败", { description: api.asError(cause) });
     } finally {
       setSyncing(false);
       // 无论结果如何都刷新判定（部分成功也要让新状态可见）。
@@ -485,13 +485,6 @@ function actionFor(
   if (group.verdict === "fastForward") return { label: "同步", mode: "fastForward" };
   if (group.verdict === "diverge") return { label: "覆盖目标", mode: "overwrite" };
   return null;
-}
-
-/** 会话写入被运行中客户端拦下时的补充提示（提示需要退出的范围）。 */
-function withClientHint(message: string): string {
-  return message.includes("WorkBuddy 正在运行")
-    ? `${message}（请先退出目标账号所属的客户端）`
-    : message;
 }
 
 /**
