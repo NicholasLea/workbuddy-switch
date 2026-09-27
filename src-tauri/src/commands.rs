@@ -711,6 +711,33 @@ pub async fn session_links_preview_cross(
     .map_err(|e| e.to_string())?
 }
 
+/// POST /api/session-sync/cross —— 把显式来源账号的新增同步到显式目标账号（会话管理页）。
+///
+/// `syncSelections` 与切号弹窗同形（core 校验缺 groupId / previewToken / mode）；
+/// 跨档支持：源正文按源档读取，写入侧仍以目标账号为准。
+#[tauri::command(rename_all = "camelCase")]
+pub async fn session_sync_cross(
+    source_account_id: String,
+    target_account_id: String,
+    sync_selections: Value,
+) -> Result<Value, String> {
+    if source_account_id.trim().is_empty() {
+        return Err("缺少 sourceAccountId".to_string());
+    }
+    if target_account_id.trim().is_empty() {
+        return Err("缺少 targetAccountId".to_string());
+    }
+    // 入参形状由 core 校验：缺字段/未知模式一律拒绝，这里只做透传。
+    let selections = session::parse_sync_selections(Some(&sync_selections))?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let source = account::find_account(&source_account_id).ok_or("源账号不存在")?;
+        let target = account::find_account(&target_account_id).ok_or("目标账号不存在")?;
+        session::sync_sessions_cross(&source, &target, &selections)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 // ---------------------------------------------------------------------------
 // 阶段 3：签到 + token 刷新
 // ---------------------------------------------------------------------------

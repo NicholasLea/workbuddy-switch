@@ -134,6 +134,7 @@ pub fn router() -> Router {
             "/api/session-links/preview-cross",
             post(api_session_links_preview_cross),
         )
+        .route("/api/session-sync/cross", post(api_session_sync_cross))
         .route("/api/checkin/status", get(api_checkin_status))
         .route("/api/credits", post(api_credits))
         .route("/api/credits/stats", get(api_credit_statistics))
@@ -978,6 +979,36 @@ async fn api_session_links_preview_cross(Json(body): Json<Value>) -> Response {
         return json_err("目标账号不存在".to_string(), StatusCode::BAD_REQUEST);
     };
     match session::session_links_preview_cross(&source, &target) {
+        Ok(report) => json_ok(report),
+        Err(error) => json_err(error, StatusCode::BAD_REQUEST),
+    }
+}
+
+/// POST /api/session-sync/cross —— 把显式来源账号的新增同步到显式目标账号（跨档支持）。
+///
+/// `syncSelections` 与切号弹窗同形（core 校验缺 groupId / previewToken / mode）。
+async fn api_session_sync_cross(Json(body): Json<Value>) -> Response {
+    let source_account_id = body
+        .get("sourceAccountId")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let target_account_id = body
+        .get("targetAccountId")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let Some(source) = account::find_account(&source_account_id) else {
+        return json_err("源账号不存在".to_string(), StatusCode::BAD_REQUEST);
+    };
+    let Some(target) = account::find_account(&target_account_id) else {
+        return json_err("目标账号不存在".to_string(), StatusCode::BAD_REQUEST);
+    };
+    let selections = match session::parse_sync_selections(body.get("syncSelections")) {
+        Ok(selections) => selections,
+        Err(error) => return json_err(error, StatusCode::BAD_REQUEST),
+    };
+    match session::sync_sessions_cross(&source, &target, &selections) {
         Ok(report) => json_ok(report),
         Err(error) => json_err(error, StatusCode::BAD_REQUEST),
     }

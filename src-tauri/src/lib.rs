@@ -224,6 +224,7 @@ pub fn run() {
             commands::copy_sessions_cross,
             commands::session_links_preview,
             commands::session_links_preview_cross,
+            commands::session_sync_cross,
             commands::open_permission_settings,
             commands::check_auth_permission,
             commands::reveal_app_in_finder,
