@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { ArrowRight, Copy, Loader2, RefreshCw } from "lucide-react";
+import { ArrowLeftRight, ArrowRight, Copy, Loader2, RefreshCw } from "lucide-react";
 import { toast } from "sonner";
 
 import { DemoAction } from "@/components/demo-action";
@@ -16,6 +16,8 @@ import type {
   Session,
   SessionLinkPreviewGroup,
   SessionLinksPreview,
+  SessionSyncMode,
+  SessionSyncSelection,
 } from "@/lib/types";
 import { useAccountsStore } from "@/stores/accounts";
 
@@ -37,6 +39,8 @@ export default function SessionsPage() {
   /** 展开的节点：任务 / 空间 / 文件夹。默认全部收起。 */
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [copying, setCopying] = useState(false);
+  /** 同步执行中（单行或批量共用，防止并发重复提交）。 */
+  const [syncing, setSyncing] = useState(false);
   /** 行尾副本标记（本次页面会话内有效）。 */
   const [marks, setMarks] = useState<Map<string, CopyMark>>(new Map());
   /** 源 ↔ 目标 的副本状态预览（只读判定；两个账号都选定后才请求）。 */
@@ -148,6 +152,22 @@ export default function SessionsPage() {
     return null;
   })();
 
+  // 组 id → 标题（同步结果的错误提示按组展示）。
+  const titleByGroupId = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const group of preview?.groups ?? []) map.set(group.groupId, group.title);
+    return map;
+  }, [preview]);
+
+  // 可直接快进的组（批量同步用；冲突组需在行内逐条显式覆盖）。
+  const fastForwardGroups = useMemo(
+    () =>
+      (preview?.groups ?? []).filter(
+        (group) => group.verdict === "fastForward" && Boolean(group.previewToken),
+      ),
+    [preview],
+  );
+
   function toggleSession(id: string) {
     setSelected((prev) => {
       const next = new Set(prev);
@@ -218,9 +238,59 @@ export default function SessionsPage() {
         });
       }
     } catch (cause) {
-      toast.error("会话复制失败", { description: api.asError(cause) });
+      toast.error("会话复制失败", { description: withClientHint(api.asError(cause)) });
     } finally {
       setCopying(false);
+    }
+  }
+
+  /** 一条同步选择：凭据必须原样回传（后端逐项复核，过期即跳过）。 */
+  function selectionOf(
+    group: SessionLinkPreviewGroup,
+    mode: SessionSyncMode,
+  ): SessionSyncSelection {
+    return { groupId: group.groupId, previewToken: group.previewToken ?? "", mode };
+  }
+
+  /** 执行同步（单行或批量）：结果逐类提示（成功/跳过/失败/未完成），绝不静默。 */
+  async function doSync(selections: SessionSyncSelection[]) {
+    if (!source || !target || selections.length === 0 || syncing) return;
+    setSyncing(true);
+    try {
+      const report = await api.sessionSyncCross(source.id, target.id, selections);
+      const synced = report.synced ?? [];
+      const skipped = report.skipped ?? [];
+      const errors = report.errors ?? [];
+      if (synced.length > 0) {
+        toast.success(`已同步到「${accountLabel(target)}」`, {
+          description: `已同步 ${synced.length} 个会话`,
+        });
+      }
+      if (skipped.length > 0) {
+        toast.warning("部分会话未同步（内容可能已变化）", {
+          description: skipped.map((item) => item.message).join("；"),
+        });
+      }
+      if (errors.length > 0) {
+        const label = (groupId?: string) => (groupId && titleByGroupId.get(groupId)) || groupId || "会话";
+        toast.error("部分会话同步失败", {
+          description: errors
+            .map((item) => `${label(item.groupId)}：${withClientHint(item.error)}`)
+            .join("；"),
+        });
+      }
+      if (report.needsRecovery) {
+        toast.error("有会话操作没有完成", {
+          description:
+            "已保留操作记录与备份，下次操作会先恢复；恢复完成前不会再改动目标账号的内容。",
+        });
+      }
+    } catch (cause) {
+      toast.error("会话同步失败", { description: withClientHint(api.asError(cause)) });
+    } finally {
+      setSyncing(false);
+      // 无论结果如何都刷新判定（部分成功也要让新状态可见）。
+      setPreviewRefreshKey((key) => key + 1);
     }
   }
 
@@ -267,6 +337,19 @@ export default function SessionsPage() {
             <RefreshCw className={loading ? "animate-spin" : undefined} />
             刷新
           </Button>
+          <DemoAction>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() =>
+                void doSync(fastForwardGroups.map((group) => selectionOf(group, "fastForward")))
+              }
+              disabled={syncing || fastForwardGroups.length === 0}
+            >
+              <ArrowLeftRight />
+              同步落后副本（{fastForwardGroups.length}）
+            </Button>
+          </DemoAction>
           <DemoAction>
             <Button onClick={() => void doCopy()} disabled={!ready}>
               {copying ? <Loader2 className="animate-spin" /> : <Copy />}
@@ -323,16 +406,34 @@ export default function SessionsPage() {
                 const group = previewBySession.get(session.id);
                 if (group) {
                   const text = verdictTrailingText(group);
-                  if (!text) return null;
+                  const action = actionFor(group);
+                  if (!text && !action) return null;
                   return (
-                    <span
-                      className={`shrink-0 text-[11px] tabular-nums ${
-                        group.verdict === "diverge"
-                          ? "text-amber-700 dark:text-amber-400"
-                          : "text-muted-foreground"
-                      }`}
-                    >
-                      {text}
+                    <span className="flex shrink-0 items-center gap-2">
+                      {text && (
+                        <span
+                          className={`text-[11px] tabular-nums ${
+                            group.verdict === "diverge"
+                              ? "text-amber-700 dark:text-amber-400"
+                              : "text-muted-foreground"
+                          }`}
+                        >
+                          {text}
+                        </span>
+                      )}
+                      {action && (
+                        <DemoAction>
+                          <Button
+                            variant={group.verdict === "diverge" ? "outline" : "secondary"}
+                            size="sm"
+                            className="h-6 px-2 text-[11px]"
+                            disabled={syncing}
+                            onClick={() => void doSync([selectionOf(group, action.mode)])}
+                          >
+                            {action.label}
+                          </Button>
+                        </DemoAction>
+                      )}
                     </span>
                   );
                 }
@@ -374,6 +475,23 @@ function AccountOption({ account }: { account: AccountMeta }) {
 function formatTime(ts: number): string {
   const date = new Date(ts);
   return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+}
+
+/** 行内动作：可快进驻「同步」，冲突需显式覆盖（一致/目标更新/未知不给动作）。 */
+function actionFor(
+  group: SessionLinkPreviewGroup,
+): { label: string; mode: SessionSyncMode } | null {
+  if (!group.previewToken) return null;
+  if (group.verdict === "fastForward") return { label: "同步", mode: "fastForward" };
+  if (group.verdict === "diverge") return { label: "覆盖目标", mode: "overwrite" };
+  return null;
+}
+
+/** 会话写入被运行中客户端拦下时的补充提示（提示需要退出的范围）。 */
+function withClientHint(message: string): string {
+  return message.includes("WorkBuddy 正在运行")
+    ? `${message}（请先退出目标账号所属的客户端）`
+    : message;
 }
 
 /**

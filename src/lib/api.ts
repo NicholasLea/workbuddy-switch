@@ -30,6 +30,7 @@ import type {
   Session,
   SessionCopyReport,
   SessionLinksPreview,
+  SessionSyncReport,
   SessionSyncSelection,
   SwitchResult,
   TravelConfig,
@@ -141,6 +142,7 @@ const ROUTES: Record<string, Route> = {
   copy_sessions_cross: { method: "POST", path: "/api/sessions/copy-cross" },
   session_links_preview: { method: "POST", path: "/api/session-links/preview" },
   session_links_preview_cross: { method: "POST", path: "/api/session-links/preview-cross" },
+  session_sync_cross: { method: "POST", path: "/api/session-sync/cross" },
   get_checkin_status: { method: "GET", path: "/api/checkin/status" },
   get_credit_expiry: { method: "POST", path: "/api/credits" },
   get_credit_statistics: { method: "GET", path: "/api/credits/stats" },
@@ -567,6 +569,20 @@ export function sessionLinksPreviewCross(
   targetAccountId: string,
 ): Promise<SessionLinksPreview> {
   return call("session_links_preview_cross", { sourceAccountId, targetAccountId });
+}
+
+/**
+ * 把显式来源账号的新增同步到显式目标账号（跨档支持；会话管理页用）。
+ *
+ * `syncSelections` 与切号弹窗同形（含预览凭据，执行时后端逐项复核）；
+ * 目标档客户端运行时会返回明确错误（不写半成品）。
+ */
+export function sessionSyncCross(
+  sourceAccountId: string,
+  targetAccountId: string,
+  syncSelections: SessionSyncSelection[],
+): Promise<SessionSyncReport> {
+  return call("session_sync_cross", { sourceAccountId, targetAccountId, syncSelections });
 }
 
 /** 打开系统设置授权面板（桌面端专用；webui 模式由服务进程权限决定，无操作）。 */

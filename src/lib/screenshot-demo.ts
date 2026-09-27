@@ -632,6 +632,8 @@ function demoPreviewGroup(
     defaultChecked: verdict === "fastForward",
     availableModes: verdict === "fastForward" ? ["fastForward"] : verdict === "diverge" ? ["overwrite"] : [],
     reason: "演示数据",
+    // 演示凭据：让「同步 / 覆盖目标」按钮在演示页可见（点击由 DemoAction 拦截）。
+    previewToken: `demo-token-${sessionId}`,
     recordCount: { source: 10 + extraA, target: 10 + extraB, baseline: 10 },
     source: { memberId: `m-src-${sessionId}`, uid: "demo-source", accountId: null, sessionId, state: "active" },
     target: {
