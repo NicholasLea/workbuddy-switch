@@ -133,6 +133,9 @@ export interface LinkedCopyResult {
 export interface SessionCopyReport {
   sourceUid?: string;
   targetUid?: string;
+  /** 跨档复制时带两侧档位；同档复制不出现这两个字段。 */
+  sourceVariant?: WbVariant;
+  targetVariant?: WbVariant;
   copied?: CopyResult[];
   alreadyLinked?: LinkedCopyResult[];
   errors?: { id: string; error: string }[];

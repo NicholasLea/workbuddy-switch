@@ -137,6 +137,7 @@ const ROUTES: Record<string, Route> = {
   switch_account: { method: "POST", path: "/api/switch" },
   list_sessions: { method: "GET", path: "/api/sessions" },
   copy_sessions: { method: "POST", path: "/api/sessions/copy" },
+  copy_sessions_cross: { method: "POST", path: "/api/sessions/copy-cross" },
   session_links_preview: { method: "POST", path: "/api/session-links/preview" },
   get_checkin_status: { method: "GET", path: "/api/checkin/status" },
   get_credit_expiry: { method: "POST", path: "/api/credits" },
@@ -513,6 +514,20 @@ export function copySessions(
   sessionIds: string[],
 ): Promise<SessionCopyReport & { variant?: WbVariant }> {
   return call("copy_sessions", { targetAccountId, sessionIds });
+}
+
+/**
+ * 跨档把会话从**显式源账号**复制到**显式目标账号**（会话管理页用）。
+ *
+ * 与 `copySessions` 同形，只多一个 `sourceAccountId`：源可为国内版或国际版账号，
+ * 不再要求源是当前登录账号；报告另带 `sourceVariant` / `targetVariant`。
+ */
+export function copySessionsCross(
+  sourceAccountId: string,
+  targetAccountId: string,
+  sessionIds: string[],
+): Promise<SessionCopyReport & { variant?: WbVariant }> {
+  return call("copy_sessions_cross", { sourceAccountId, targetAccountId, sessionIds });
 }
 
 /**
