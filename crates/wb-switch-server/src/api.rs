@@ -21,7 +21,7 @@ use wb_switch_core::modules::{
     account, auth_file, checkin, codebuddy_cli, codebuddy_cn_ide, codebuddy_ide,
     codebuddy_ide_session, codebuddy_ide_session_sync, config, credit_usage, credits,
     export_import, jetbrains, limits, notifications, oauth, process, rate_limit_events,
-    rate_limit_hook, refresh, rotate, session, switch, token_stats, travel, update,
+    rate_limit_hook, refresh, rotate, session, session_groups, switch, token_stats, travel, update,
     variant::WbVariant, vscode_ext, vscode_session, vscode_session_sync,
 };
 
@@ -135,6 +135,24 @@ pub fn router() -> Router {
             post(api_session_links_preview_cross),
         )
         .route("/api/session-sync/cross", post(api_session_sync_cross))
+        .route("/api/session-groups/list", post(api_list_session_groups))
+        .route("/api/session-groups/detail", post(api_get_session_group))
+        .route(
+            "/api/session-groups/preview",
+            post(api_preview_session_group_pair),
+        )
+        .route(
+            "/api/session-groups/sync",
+            post(api_sync_session_group_pair),
+        )
+        .route(
+            "/api/session-groups/sync-safe",
+            post(api_sync_session_group_safe_batch),
+        )
+        .route(
+            "/api/session-groups/add",
+            post(api_add_session_group_member),
+        )
         .route("/api/checkin/status", get(api_checkin_status))
         .route("/api/credits", post(api_credits))
         .route("/api/credits/stats", get(api_credit_statistics))
@@ -1010,6 +1028,118 @@ async fn api_session_sync_cross(Json(body): Json<Value>) -> Response {
     };
     match session::sync_sessions_cross(&source, &target, &selections) {
         Ok(report) => json_ok(report),
+        Err(error) => json_err(error, StatusCode::BAD_REQUEST),
+    }
+}
+
+fn session_group_request(
+    body: &Value,
+) -> Result<(session_groups::SessionClient, Option<WbVariant>), String> {
+    let client = body
+        .get("client")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "缺少 client".to_string())?;
+    let client = session_groups::SessionClient::parse(client)?;
+    let scope =
+        session_groups::parse_variant_scope(body.get("variantScope").and_then(Value::as_str))?;
+    Ok((client, scope))
+}
+
+async fn api_list_session_groups(Json(body): Json<Value>) -> Response {
+    let (client, scope) = match session_group_request(&body) {
+        Ok(value) => value,
+        Err(error) => return json_err(error, StatusCode::BAD_REQUEST),
+    };
+    match session_groups::list(client, scope) {
+        Ok(value) => json_ok(value),
+        Err(error) => json_err(error, StatusCode::BAD_REQUEST),
+    }
+}
+
+async fn api_get_session_group(Json(body): Json<Value>) -> Response {
+    let (client, scope) = match session_group_request(&body) {
+        Ok(value) => value,
+        Err(error) => return json_err(error, StatusCode::BAD_REQUEST),
+    };
+    let group_id = body.get("groupId").and_then(Value::as_str).unwrap_or("");
+    match session_groups::detail(client, scope, group_id) {
+        Ok(value) => json_ok(value),
+        Err(error) => json_err(error, StatusCode::BAD_REQUEST),
+    }
+}
+
+async fn api_preview_session_group_pair(Json(body): Json<Value>) -> Response {
+    let (client, scope) = match session_group_request(&body) {
+        Ok(value) => value,
+        Err(error) => return json_err(error, StatusCode::BAD_REQUEST),
+    };
+    let args = (
+        body.get("groupId").and_then(Value::as_str).unwrap_or(""),
+        body.get("sourceMemberId")
+            .and_then(Value::as_str)
+            .unwrap_or(""),
+        body.get("targetMemberId")
+            .and_then(Value::as_str)
+            .unwrap_or(""),
+    );
+    match session_groups::preview_pair(client, scope, args.0, args.1, args.2) {
+        Ok(value) => json_ok(value),
+        Err(error) => json_err(error, StatusCode::BAD_REQUEST),
+    }
+}
+
+async fn api_sync_session_group_pair(Json(body): Json<Value>) -> Response {
+    let (client, scope) = match session_group_request(&body) {
+        Ok(value) => value,
+        Err(error) => return json_err(error, StatusCode::BAD_REQUEST),
+    };
+    let args = (
+        body.get("groupId").and_then(Value::as_str).unwrap_or(""),
+        body.get("sourceMemberId")
+            .and_then(Value::as_str)
+            .unwrap_or(""),
+        body.get("targetMemberId")
+            .and_then(Value::as_str)
+            .unwrap_or(""),
+        body.get("previewToken")
+            .and_then(Value::as_str)
+            .unwrap_or(""),
+        body.get("mode").and_then(Value::as_str).unwrap_or(""),
+    );
+    match session_groups::sync_pair(client, scope, args.0, args.1, args.2, args.3, args.4) {
+        Ok(value) => json_ok(value),
+        Err(error) => json_err(error, StatusCode::BAD_REQUEST),
+    }
+}
+
+async fn api_sync_session_group_safe_batch(Json(body): Json<Value>) -> Response {
+    let (client, scope) = match session_group_request(&body) {
+        Ok(value) => value,
+        Err(error) => return json_err(error, StatusCode::BAD_REQUEST),
+    };
+    let group_id = body.get("groupId").and_then(Value::as_str).unwrap_or("");
+    match session_groups::sync_safe_batch(client, scope, group_id) {
+        Ok(value) => json_ok(value),
+        Err(error) => json_err(error, StatusCode::BAD_REQUEST),
+    }
+}
+
+async fn api_add_session_group_member(Json(body): Json<Value>) -> Response {
+    let (client, scope) = match session_group_request(&body) {
+        Ok(value) => value,
+        Err(error) => return json_err(error, StatusCode::BAD_REQUEST),
+    };
+    let args = (
+        body.get("groupId").and_then(Value::as_str).unwrap_or(""),
+        body.get("sourceMemberId")
+            .and_then(Value::as_str)
+            .unwrap_or(""),
+        body.get("targetAccountId")
+            .and_then(Value::as_str)
+            .unwrap_or(""),
+    );
+    match session_groups::add_member(client, scope, args.0, args.1, args.2) {
+        Ok(value) => json_ok(value),
         Err(error) => json_err(error, StatusCode::BAD_REQUEST),
     }
 }

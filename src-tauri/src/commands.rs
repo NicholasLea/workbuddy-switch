@@ -11,7 +11,7 @@ use wb_switch_core::modules::{
     account, auth_file, checkin, codebuddy_cli, codebuddy_cn_ide, codebuddy_ide,
     codebuddy_ide_session, codebuddy_ide_session_sync, credit_usage, credits, error_log,
     export_import, jetbrains, limits, notifications, oauth, process, rate_limit_events,
-    rate_limit_hook, refresh, rotate, session, switch, token_stats, travel, update,
+    rate_limit_hook, refresh, rotate, session, session_groups, switch, token_stats, travel, update,
     variant::WbVariant, vscode_ext, vscode_session, vscode_session_sync,
 };
 
@@ -736,6 +736,119 @@ pub async fn session_sync_cross(
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn list_session_groups(
+    client: String,
+    variant_scope: Option<String>,
+) -> Result<Value, String> {
+    let client = session_groups::SessionClient::parse(&client)?;
+    let scope = session_groups::parse_variant_scope(variant_scope.as_deref())?;
+    tauri::async_runtime::spawn_blocking(move || session_groups::list(client, scope))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn get_session_group(
+    client: String,
+    variant_scope: Option<String>,
+    group_id: String,
+) -> Result<Value, String> {
+    let client = session_groups::SessionClient::parse(&client)?;
+    let scope = session_groups::parse_variant_scope(variant_scope.as_deref())?;
+    tauri::async_runtime::spawn_blocking(move || session_groups::detail(client, scope, &group_id))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn preview_session_group_pair(
+    client: String,
+    variant_scope: Option<String>,
+    group_id: String,
+    source_member_id: String,
+    target_member_id: String,
+) -> Result<Value, String> {
+    let client = session_groups::SessionClient::parse(&client)?;
+    let scope = session_groups::parse_variant_scope(variant_scope.as_deref())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        session_groups::preview_pair(
+            client,
+            scope,
+            &group_id,
+            &source_member_id,
+            &target_member_id,
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn sync_session_group_pair(
+    client: String,
+    variant_scope: Option<String>,
+    group_id: String,
+    source_member_id: String,
+    target_member_id: String,
+    preview_token: String,
+    mode: String,
+) -> Result<Value, String> {
+    let client = session_groups::SessionClient::parse(&client)?;
+    let scope = session_groups::parse_variant_scope(variant_scope.as_deref())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        session_groups::sync_pair(
+            client,
+            scope,
+            &group_id,
+            &source_member_id,
+            &target_member_id,
+            &preview_token,
+            &mode,
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn sync_session_group_safe_batch(
+    client: String,
+    variant_scope: Option<String>,
+    group_id: String,
+) -> Result<Value, String> {
+    let client = session_groups::SessionClient::parse(&client)?;
+    let scope = session_groups::parse_variant_scope(variant_scope.as_deref())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        session_groups::sync_safe_batch(client, scope, &group_id)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn add_session_group_member(
+    client: String,
+    variant_scope: Option<String>,
+    group_id: String,
+    source_member_id: String,
+    target_account_id: String,
+) -> Result<Value, String> {
+    let client = session_groups::SessionClient::parse(&client)?;
+    let scope = session_groups::parse_variant_scope(variant_scope.as_deref())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        session_groups::add_member(
+            client,
+            scope,
+            &group_id,
+            &source_member_id,
+            &target_account_id,
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 // ---------------------------------------------------------------------------

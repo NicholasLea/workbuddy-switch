@@ -860,6 +860,15 @@ pub fn try_acquire_variant_ops_lock(
         .map_err(|error| error.message(VARIANT_OPS_LOCK_NAME))
 }
 
+/// Namespace-wide operation lock for IDE/extension stores shared across WorkBuddy variants.
+/// The caller holds it across duplicate checks, copy/sync, and link registration.
+pub fn try_acquire_client_ops_lock(paths: &SessionPaths) -> Result<FileLock, String> {
+    try_lock_file(&paths.client_ops_lock_file()).map_err(|error| match error {
+        LockError::Busy => "该客户端正在执行其它会话操作，请稍后重试".to_string(),
+        LockError::Unavailable(reason) => format!("无法建立客户端会话操作锁：{reason}"),
+    })
+}
+
 fn acquire_link_store_lock(paths: &SessionPaths) -> Result<FileLock, String> {
     let path = paths.link_store_lock_file();
     for _ in 0..STORE_LOCK_RETRY {

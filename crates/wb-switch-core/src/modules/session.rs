@@ -187,6 +187,17 @@ impl SessionPaths {
             .join(format!("session-ops-{}.lock", variant.as_str()))
     }
 
+    /// Long-running client-scoped session operation lock. IDE and VS Code stores are shared
+    /// across WorkBuddy variants, so their mutations must serialize across both variants.
+    pub fn client_ops_lock_file(&self) -> PathBuf {
+        let name = match self.link_namespace {
+            LinkNamespace::WorkBuddy => "workbuddy",
+            LinkNamespace::VscodeExt => "vscode-ext",
+            LinkNamespace::CodeBuddyIde => "codebuddy-ide",
+        };
+        self.locks_dir().join(format!("session-client-{name}.lock"))
+    }
+
     /// 关联存储的短时全局锁文件：与主表同生命周期，按命名空间分开。
     pub fn link_store_lock_file(&self) -> PathBuf {
         match self.link_namespace {
@@ -481,7 +492,7 @@ fn list_sessions_for_user_at(paths: &SessionPaths, uid: &str) -> Value {
 }
 
 /// 在 `{档位数据根}/projects/{workspace}/{cid}.jsonl` 定位会话正文。
-fn find_project_jsonl(paths: &SessionPaths, cid: &str) -> Option<PathBuf> {
+pub(crate) fn find_project_jsonl(paths: &SessionPaths, cid: &str) -> Option<PathBuf> {
     let projects = paths.projects_dir();
     if !projects.is_dir() {
         return None;
@@ -1662,7 +1673,7 @@ pub fn parse_sync_selections(value: Option<&Value>) -> Result<Vec<SyncSelection>
 }
 
 /// 成员当前正文状态；`projects/` 下找不到正文一律按 Missing（不当作空正文）。
-fn member_content_state(paths: &SessionPaths, session_id: &str) -> ContentState {
+pub(crate) fn member_content_state(paths: &SessionPaths, session_id: &str) -> ContentState {
     match find_project_jsonl(paths, session_id) {
         Some(path) => session_link::read_content_snapshot(&path, session_id),
         None => ContentState::Missing,
