@@ -578,7 +578,7 @@ pub fn decide_sync(
         return SyncDecision::decide(
             SyncVerdict::FastForward,
             counts,
-            format!("目标账号没有独有改动，当前账号新增 {added} 条，可以直接同步"),
+            format!("目标账号没有独有改动，来源账号新增 {added} 条，可以直接同步"),
         );
     }
     let Some(record) = baseline.ready() else {
@@ -1436,7 +1436,7 @@ pub fn verify_preview(preview: &PreviewToken, live: &PreviewBinding) -> Vec<Stri
         stale.push("会话的关联关系或同步记录已变化".to_string());
     }
     if expected.source != live.source {
-        stale.push("当前账号的内容已变化".to_string());
+        stale.push("来源账号的内容已变化".to_string());
     }
     if expected.target != live.target {
         stale.push("目标账号的内容已变化".to_string());
@@ -3064,7 +3064,7 @@ mod tests {
                 },
             ),
             (
-                "当前账号",
+                "来源账号",
                 PreviewBinding {
                     source: PreviewMemberBinding {
                         raw_digest: "changed".to_string(),

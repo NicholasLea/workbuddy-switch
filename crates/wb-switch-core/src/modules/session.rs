@@ -6893,7 +6893,7 @@ mod tests {
             skipped["message"]
                 .as_str()
                 .unwrap()
-                .contains("当前账号的内容已变化"),
+                .contains("来源账号的内容已变化"),
             "{skipped}"
         );
         assert_eq!(
