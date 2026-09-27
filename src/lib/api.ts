@@ -55,7 +55,7 @@ import { screenshotDemoResponse } from "./screenshot-demo";
 const API_BASE = "http://127.0.0.1:57890";
 
 const DEMO_READ_COMMANDS = new Set([
-  "get_status", "get_accounts", "get_codebuddy_cli_status", "get_codebuddy_cn_ide_status", "get_codebuddy_ide_status", "get_vscode_ext_status", "get_jetbrains_status", "list_vscode_sessions", "list_codebuddy_ide_sessions", "list_codebuddy_intl_ide_sessions", "vscode_session_links_preview", "codebuddy_ide_session_links_preview", "codebuddy_intl_ide_session_links_preview", "account_sessions", "get_checkin_status",
+  "get_status", "get_accounts", "get_codebuddy_cli_status", "get_codebuddy_cn_ide_status", "get_codebuddy_ide_status", "get_vscode_ext_status", "get_jetbrains_status", "list_vscode_sessions", "list_codebuddy_ide_sessions", "list_codebuddy_intl_ide_sessions", "vscode_session_links_preview", "codebuddy_ide_session_links_preview", "codebuddy_intl_ide_session_links_preview", "account_sessions", "session_links_preview_cross", "get_checkin_status",
   "get_credit_expiry", "get_credit_statistics", "get_auto_checkin_config",
   "get_token_statistics",
   "get_checkin_logs", "get_auto_rotate_config", "rotate_status", "get_rotate_logs",
@@ -140,6 +140,7 @@ const ROUTES: Record<string, Route> = {
   copy_sessions: { method: "POST", path: "/api/sessions/copy" },
   copy_sessions_cross: { method: "POST", path: "/api/sessions/copy-cross" },
   session_links_preview: { method: "POST", path: "/api/session-links/preview" },
+  session_links_preview_cross: { method: "POST", path: "/api/session-links/preview-cross" },
   get_checkin_status: { method: "GET", path: "/api/checkin/status" },
   get_credit_expiry: { method: "POST", path: "/api/credits" },
   get_credit_statistics: { method: "GET", path: "/api/credits/stats" },
@@ -553,6 +554,19 @@ export function sessionLinksPreview(
   const args: Record<string, unknown> = { targetAccountId };
   if (variant === "ai") args.variant = variant;
   return call("session_links_preview", args);
+}
+
+/**
+ * 预览「显式来源账号 → 显式目标账号」可同步的关联会话（只读；跨档支持）。
+ *
+ * 与 `sessionLinksPreview` 同形，多一个 `sourceAccountId`；成员内容按成员自身档位读取
+ * （跨档组的源读源档、目标读目标档）。报告在跨档时带 `sourceVariant` / `targetVariant`。
+ */
+export function sessionLinksPreviewCross(
+  sourceAccountId: string,
+  targetAccountId: string,
+): Promise<SessionLinksPreview> {
+  return call("session_links_preview_cross", { sourceAccountId, targetAccountId });
 }
 
 /** 打开系统设置授权面板（桌面端专用；webui 模式由服务进程权限决定，无操作）。 */

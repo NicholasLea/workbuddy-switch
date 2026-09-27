@@ -2,7 +2,7 @@ import type {
   AccountMeta, AppStatus, AutoRotateConfig, CheckinConfig, CheckinLog,
   CodeBuddyCliStatus, CodeBuddyCliSwitchResult, CodeBuddyCnIdeStatus, CreditExpiry, CreditOfficialUsageModel, CreditStatistics,
   GithubConfig, RateLimitHookStatus, RateLimitsPayload, RotateLog, RotateStatus, TokenStatistics, TokenStatsGroup, TokenStatsRequestRow, TokenStatsSource, TokenStatsTotals,
-  Session, SessionLinksPreview, TravelConfig, TravelStatus, VscodeExtStatus, VscodeSessionList,
+  Session, SessionLinkPreviewGroup, SessionLinksPreview, SessionSyncVerdict, TravelConfig, TravelStatus, VscodeExtStatus, VscodeSessionList,
 } from "./types";
 import { demoModeEnabled } from "./demo-mode";
 import { accountVariant, normalizeVariant, variantSupportsCheckin } from "./variant";
@@ -613,6 +613,37 @@ function demoAccountSessions(intl: boolean): Session[] {
   ];
 }
 
+/** 会话管理页的副本状态演示项（判定口径与后端 `decide_sync` 一致）。 */
+function demoPreviewGroup(
+  sessionId: string,
+  title: string,
+  verdict: SessionSyncVerdict,
+  extraA: number,
+  extraB: number,
+): SessionLinkPreviewGroup {
+  return {
+    groupId: `demo-group-${sessionId}`,
+    title,
+    cwd: "/Users/demo",
+    verdict,
+    extraA,
+    extraB,
+    common: 10,
+    defaultChecked: verdict === "fastForward",
+    availableModes: verdict === "fastForward" ? ["fastForward"] : verdict === "diverge" ? ["overwrite"] : [],
+    reason: "演示数据",
+    recordCount: { source: 10 + extraA, target: 10 + extraB, baseline: 10 },
+    source: { memberId: `m-src-${sessionId}`, uid: "demo-source", accountId: null, sessionId, state: "active" },
+    target: {
+      memberId: `m-tgt-${sessionId}`,
+      uid: "demo-target",
+      accountId: null,
+      sessionId: `${sessionId}-copy`,
+      state: "active",
+    },
+  };
+}
+
 /** Read-only demo response provider. It never reads or mutates real user data. */
 export function screenshotDemoResponse(command: string, args?: Record<string, unknown>): unknown {
   const demoAccounts = hydratedAccounts();
@@ -704,6 +735,24 @@ export function screenshotDemoResponse(command: string, args?: Record<string, un
     case "list_codebuddy_ide_sessions": return demoIdeSessionList(demoAccounts[0].uid ?? "demo-source");
     case "list_codebuddy_intl_ide_sessions": return demoIdeSessionList(intlAccountA.uid ?? "demo-intl-source");
     // 关联预览：演示库没有复制记录，返回 missing（弹窗默认 tab 会拉一次；不得落到「演示模式不可操作」）。
+    // 会话管理页的副本状态（演示）：三条会话分别展示「目标落后 / 已一致 / 两边都有改动」。
+    case "session_links_preview_cross": {
+      const source = demoAccounts.find((account) => account.id === args?.sourceAccountId) ?? demoAccounts[0];
+      const target = demoAccounts.find((account) => account.id === args?.targetAccountId) ?? demoAccounts[1] ?? demoAccounts[0];
+      return {
+        supported: true,
+        storeStatus: "ready",
+        sourceUid: source.uid ?? "demo-source",
+        targetUid: target.uid ?? "demo-target",
+        sourceVariant: accountVariant(source),
+        targetVariant: accountVariant(target),
+        groups: [
+          demoPreviewGroup("demo-sess-space-1", "跨档复制内核改造", "fastForward", 3, 0),
+          demoPreviewGroup("demo-sess-space-2", "会话管理页骨架", "identical", 0, 0),
+          demoPreviewGroup("demo-sess-task-1", "整理会话复制文案", "diverge", 4, 2),
+        ],
+      } satisfies SessionLinksPreview;
+    }
     case "codebuddy_ide_session_links_preview":
     case "codebuddy_intl_ide_session_links_preview":
     case "vscode_session_links_preview": {

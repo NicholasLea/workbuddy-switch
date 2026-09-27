@@ -208,6 +208,9 @@ export interface SessionLinksPreview {
   storeError?: string;
   sourceUid: string;
   targetUid: string;
+  /** 跨档预览时带两侧档位；同档预览不出现这两个字段。 */
+  sourceVariant?: WbVariant;
+  targetVariant?: WbVariant;
   groups: SessionLinkPreviewGroup[];
 }
 

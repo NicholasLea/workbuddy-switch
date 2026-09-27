@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { ArrowRight, Copy, Loader2, RefreshCw } from "lucide-react";
 import { toast } from "sonner";
 
@@ -11,7 +11,12 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Skeleton } from "@/components/ui/skeleton";
 import * as api from "@/lib/api";
 import { accountVariant, variantLabel } from "@/lib/variant";
-import type { AccountMeta, Session } from "@/lib/types";
+import type {
+  AccountMeta,
+  Session,
+  SessionLinkPreviewGroup,
+  SessionLinksPreview,
+} from "@/lib/types";
 import { useAccountsStore } from "@/stores/accounts";
 
 /** 行尾副本标记：本次页面会话内复制过（或确认已有副本）的会话 → 目标账号与时间。 */
@@ -34,6 +39,11 @@ export default function SessionsPage() {
   const [copying, setCopying] = useState(false);
   /** 行尾副本标记（本次页面会话内有效）。 */
   const [marks, setMarks] = useState<Map<string, CopyMark>>(new Map());
+  /** 源 ↔ 目标 的副本状态预览（只读判定；两个账号都选定后才请求）。 */
+  const [preview, setPreview] = useState<SessionLinksPreview | null>(null);
+  const [previewError, setPreviewError] = useState<string | null>(null);
+  /** 复制成功后自增，触发预览刷新。 */
+  const [previewRefreshKey, setPreviewRefreshKey] = useState(0);
 
   // 账号列表与当前登录态：直接打开本页时不依赖账号页先加载。
   useEffect(() => {
@@ -77,16 +87,66 @@ export default function SessionsPage() {
     void loadSessions(sourceId);
   }, [sourceId, loadSessions]);
 
-  // 目标账号不能与来源相同：来源变化后清掉失效的目标选择。
+  // 目标账号不能与来源相同：来源变化后自动选一个不同的账号，副本状态一进页面即可见
+  // （复制仍需勾选会话，误触门槛不变）。
   useEffect(() => {
-    if (targetId && targetId === sourceId) setTargetId("");
-  }, [sourceId, targetId]);
+    if (accounts.length < 2) return;
+    if (targetId && targetId !== sourceId) return;
+    const candidate = accounts.find((account) => account.id !== sourceId);
+    if (candidate) setTargetId(candidate.id);
+  }, [accounts, sourceId, targetId]);
+
+  // 两个账号都选定后加载副本状态预览（只读）；账号组合变化或复制成功后重新加载。
+  useEffect(() => {
+    if (!sourceId || !targetId) {
+      setPreview(null);
+      setPreviewError(null);
+      return;
+    }
+    let cancelled = false;
+    api
+      .sessionLinksPreviewCross(sourceId, targetId)
+      .then((report) => {
+        if (cancelled) return;
+        setPreview(report);
+        setPreviewError(null);
+      })
+      .catch((cause) => {
+        if (cancelled) return;
+        setPreview(null);
+        setPreviewError(api.asError(cause));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [sourceId, targetId, previewRefreshKey]);
 
   const source = accounts.find((account) => account.id === sourceId) ?? null;
   const target = accounts.find((account) => account.id === targetId) ?? null;
   const targetOptions = accounts.filter((account) => account.id !== sourceId);
   const noAccounts = accounts.length === 0;
   const ready = Boolean(source && target) && selected.size > 0 && !copying;
+
+  // 会话行 → 预览组（按来源成员的 sessionId 对齐；无组的会话表示尚未复制过）。
+  const previewBySession = useMemo(() => {
+    const map = new Map<string, SessionLinkPreviewGroup>();
+    for (const group of preview?.groups ?? []) {
+      const sessionId = group.source?.sessionId;
+      if (sessionId) map.set(sessionId, group);
+    }
+    return map;
+  }, [preview]);
+
+  // 副本状态整体不可用时的提示（行尾判定不显示，避免误导）。
+  const previewNote = (() => {
+    if (noAccounts || !targetId) return null;
+    if (previewError) return `副本状态暂不可用：${previewError}`;
+    if (preview && !preview.supported) return "该档位暂不支持会话同步，副本状态不可用。";
+    if (preview?.storeStatus === "unavailable") {
+      return preview.storeError ?? "同步记录不可用，副本状态暂不可用。";
+    }
+    return null;
+  })();
 
   function toggleSession(id: string) {
     setSelected((prev) => {
@@ -134,6 +194,8 @@ export default function SessionsPage() {
         }
         return next;
       });
+      // 复制改变了两边内容：刷新副本状态判定。
+      setPreviewRefreshKey((key) => key + 1);
       const copiedCount = report.copied?.length ?? 0;
       const linkedCount = report.alreadyLinked?.length ?? 0;
       const parts: string[] = [];
@@ -223,6 +285,11 @@ export default function SessionsPage() {
                 ? `来源：${accountLabel(source)}（${variantLabel(accountVariant(source))}）${loading ? "" : ` · ${sessions.length} 个会话`}`
                 : "选择来源账号后列出会话。"}
           </CardDescription>
+          {previewNote && (
+            <CardDescription className="text-amber-700 dark:text-amber-400">
+              {previewNote}
+            </CardDescription>
+          )}
         </CardHeader>
         <CardContent>
           {noAccounts ? null : loading ? (
@@ -252,6 +319,23 @@ export default function SessionsPage() {
               onToggleGroup={toggleGroup}
               onToggleExpanded={toggleExpanded}
               renderTrailing={(session) => {
+                // 有副本组的会话以真实判定为准；刚复制、预览尚未覆盖时回落到操作标记。
+                const group = previewBySession.get(session.id);
+                if (group) {
+                  const text = verdictTrailingText(group);
+                  if (!text) return null;
+                  return (
+                    <span
+                      className={`shrink-0 text-[11px] tabular-nums ${
+                        group.verdict === "diverge"
+                          ? "text-amber-700 dark:text-amber-400"
+                          : "text-muted-foreground"
+                      }`}
+                    >
+                      {text}
+                    </span>
+                  );
+                }
                 const mark = marks.get(session.id);
                 if (!mark) return null;
                 return (
@@ -290,4 +374,25 @@ function AccountOption({ account }: { account: AccountMeta }) {
 function formatTime(ts: number): string {
   const date = new Date(ts);
   return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+}
+
+/**
+ * 行尾判定文案（只读展示）：
+ * 判定口径与后端 `decide_sync` 一致，`extraA` 是来源独有、`extraB` 是目标独有记录数。
+ */
+function verdictTrailingText(group: SessionLinkPreviewGroup): string | null {
+  switch (group.verdict) {
+    case "identical":
+      return "已一致";
+    case "fastForward":
+      return group.extraA > 0 ? `目标落后 ${group.extraA} 条` : "目标落后";
+    case "ahead":
+      return group.extraB > 0 ? `目标更新 ${group.extraB} 条` : "目标有更新";
+    case "diverge":
+      return "两边都有改动";
+    case "unknown":
+      return "状态未知";
+    default:
+      return null;
+  }
 }
