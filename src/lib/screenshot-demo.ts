@@ -765,7 +765,7 @@ export function screenshotDemoResponse(command: string, args?: Record<string, un
     }
     case "get_accounts": return { accounts: demoAccounts };
     // 会话管理页：按账号返回演示会话；国际版账号给一套不同 cwd，混排时可见档位差异。
-    case "account_sessions": {
+    case "list_account_sessions": {
       const account = demoAccounts.find((item) => item.id === args?.accountId) ?? demoAccounts[0];
       return {
         sessions: demoAccountSessions(account.id === intlAccountA.id),
