@@ -5,12 +5,12 @@ import { toast } from "sonner";
 import { CodeBuddyCnIdeMark, VscodeExtMark, WorkBuddyAiMark, WorkBuddyMark } from "@/components/product-marks";
 import { DemoAction } from "@/components/demo-action";
 import { GroupDetailPanel } from "@/components/session-group-detail";
+import { SessionTreeList } from "@/components/session-tree";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
-import { Popover, PopoverArrow, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import * as api from "@/lib/api";
@@ -430,7 +430,7 @@ export default function SessionsPage() {
             </div>
             <div className="flex max-w-full flex-wrap items-center justify-end gap-2">
               <Button variant="outline" size="sm" className="shrink-0" onClick={() => void (selectedGroupId ? reloadSelectedGroup() : reloadGroups())} disabled={loading || detailLoading}><RefreshCw className={loading ? "animate-spin" : undefined} />刷新</Button>
-              <AddLinkedSessionPopover client={client} disabled={loading} onDone={() => void (selectedGroupId ? reloadSelectedGroup() : reloadGroups())} />
+              <AddLinkedSessionDialog client={client} disabled={loading} onDone={() => void (selectedGroupId ? reloadSelectedGroup() : reloadGroups())} />
             </div>
           </div>
           <Tabs value={client} onValueChange={changeClient} className="mt-4">
@@ -487,127 +487,232 @@ function accountLabel(account: AccountMeta): string {
   return account.nickname || account.email || account.uid || account.id;
 }
 
+/** 会话树区最小高度：加载态、空态与列表共用同一下沿，避免弹窗高度跳变。 */
+const LINKED_TREE_MIN_H = "min-h-[min(10rem,30vh)]";
+
 /**
- * 右上角「新增关联会话」：显式选来源账号 → 来源会话 → 目标账号，复制并建立关联。
+ * 右上角「新增关联会话」弹窗（与切号弹窗同构）：来源账号 → 会话树勾选 → 目标账号，
+ * 一次提交全部勾选。会话树复用 `SessionTreeList`（任务平铺 / 空间按文件夹分组 / 组头三态勾选）。
  *
  * 本次仅 WorkBuddy 客户端开放；其他客户端入口禁用（其复制 / 关联能力后续再补）。执行沿用
  * `copySessionsCross`：来源会话已属于某关联组则加入该组，未关联则新建关联组。
  */
-function AddLinkedSessionPopover({ client, disabled, onDone }: { client: SessionGroupClient; disabled: boolean; onDone: () => void }) {
+function AddLinkedSessionDialog({ client, disabled, onDone }: { client: SessionGroupClient; disabled: boolean; onDone: () => void }) {
   const accounts = useAccountsStore((state) => state.accounts);
   const [open, setOpen] = useState(false);
   const [sourceAccountId, setSourceAccountId] = useState("");
   const [targetAccountId, setTargetAccountId] = useState("");
   const [sessions, setSessions] = useState<Session[]>([]);
   const [sessionsLoading, setSessionsLoading] = useState(false);
-  const [sessionId, setSessionId] = useState("");
+  const [sessionsError, setSessionsError] = useState("");
+  /** 勾选 / 展开集合由调用方持有（会话树契约），执行时一次提交全部勾选。 */
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState(false);
   const requestId = useRef(0);
+  /** 复制请求代号。关窗换代后，晚到的结果不得再关闭或改写当前这次弹窗。 */
+  const copyRequestId = useRef(0);
   // 账号库就是本机 WorkBuddy 账号，国内版 / 国际版都可以作为来源或目标。
   const workbuddyAccounts = accounts;
   const sourceAccount = workbuddyAccounts.find((account) => account.id === sourceAccountId) ?? null;
+  const targetAccount = workbuddyAccounts.find((account) => account.id === targetAccountId) ?? null;
   const targetOptions = workbuddyAccounts.filter((account) => account.id !== sourceAccountId);
   const supported = client === "workbuddy";
-  const title = supported ? "选择一个来源账号的会话，复制到目标账号并建立关联。" : "当前客户端暂不支持新增关联会话";
+  const unsupportedTitle = "当前客户端暂不支持新增关联会话";
+
   async function loadSessions(account: AccountMeta) {
     const id = ++requestId.current;
     setSessionsLoading(true);
+    setSessionsError("");
     try {
       const result = await api.listAccountSessions(account.id);
       if (requestId.current !== id) return;
       setSessions(result.sessions);
-      setSessionId(result.sessions[0]?.id ?? "");
     } catch (error) {
       if (requestId.current !== id) return;
       setSessions([]);
-      setSessionId("");
-      toast.error("读取来源会话失败", { description: api.asError(error) });
+      setSessionsError(api.asError(error));
     } finally {
       if (requestId.current === id) setSessionsLoading(false);
     }
   }
-  // 换来源账号后目标账号可能仍需排除新的来源，源会话也必须重新加载。
+  // 换来源账号：作废在途请求，勾选 / 展开 / 目标账号全部重来，源会话按新账号重新加载。
   function changeSource(id: string) {
     setSourceAccountId(id);
     setTargetAccountId("");
     setSessions([]);
-    setSessionId("");
+    setSessionsError("");
+    setSelected(new Set());
+    setExpanded(new Set());
     requestId.current += 1;
     setSessionsLoading(false);
     const account = workbuddyAccounts.find((item) => item.id === id);
     if (account) void loadSessions(account);
   }
+  function blockDismissWhileBusy(event: { preventDefault: () => void }) {
+    // 遮罩写明执行中不可关闭；只藏关闭按钮挡不住 Esc 和点遮罩。
+    if (busy) event.preventDefault();
+  }
   function openChange(next: boolean) {
     if (!next) {
+      if (busy) return;
+      // 关闭时作废在途的会话读取和复制回写：晚到结果不得写回下一次打开。
       requestId.current += 1;
+      copyRequestId.current += 1;
       setSessionsLoading(false);
       setOpen(false);
       return;
     }
+    // 重新打开回到干净状态：来源 / 目标 / 勾选都重选，不复用上一次的会话列表。
+    requestId.current += 1;
+    copyRequestId.current += 1;
+    setSessionsLoading(false);
+    setBusy(false);
+    setSourceAccountId("");
+    setTargetAccountId("");
+    setSessions([]);
+    setSessionsError("");
+    setSelected(new Set());
+    setExpanded(new Set());
     setOpen(true);
-    // 关闭时作废了在途请求，会话列表可能还是空的；重新打开时补拉一次。
-    if (sourceAccount && sessions.length === 0) void loadSessions(sourceAccount);
+  }
+  function toggleSession(id: string) {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+  function toggleGroup(ids: string[]) {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      const allOn = ids.length > 0 && ids.every((id) => next.has(id));
+      if (allOn) ids.forEach((id) => next.delete(id));
+      else ids.forEach((id) => next.add(id));
+      return next;
+    });
+  }
+  function toggleExpanded(key: string) {
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
   }
   async function copyAndLink() {
-    if (!sourceAccount || !targetAccountId || !sessionId || busy) return;
+    if (!sourceAccount || !targetAccountId || sourceAccount.id === targetAccountId || selected.size === 0 || busy) return;
+    const copyId = ++copyRequestId.current;
     setBusy(true);
     try {
-      const report = await api.copySessionsCross(sourceAccount.id, targetAccountId, [sessionId]);
+      const report = await api.copySessionsCross(sourceAccount.id, targetAccountId, [...selected]);
       const copied = report.copied?.length ?? 0;
       const alreadyLinked = report.alreadyLinked?.length ?? 0;
       const errors = report.errors ?? [];
-      const targetName = workbuddyAccounts.find((account) => account.id === targetAccountId)?.nickname
-        ?? workbuddyAccounts.find((account) => account.id === targetAccountId)?.email ?? "目标账号";
-      if (copied > 0) toast.success(`已复制并关联到「${targetName}」`);
-      else if (alreadyLinked > 0 && errors.length === 0) toast.info("该账号已有关联副本");
-      if (errors.length > 0) toast.error("复制失败", { description: errors.map((item) => item.error).join("；") });
+      const targetName = targetAccount ? accountLabel(targetAccount) : "目标账号";
+      // 同一份报告可能同时含已复制、已存在与失败项：各分支各自提示，互不隐藏。
+      if (copied > 0) toast.success(`已复制 ${copied} 个会话到「${targetName}」并建立关联`);
+      if (alreadyLinked > 0) toast.info(`「${targetName}」已存在 ${alreadyLinked} 个会话的副本，未重复复制`);
+      if (errors.length > 0) {
+        const allFailed = copied === 0 && alreadyLinked === 0;
+        toast.error(allFailed ? "复制失败" : "部分会话复制失败", {
+          description: errors.map((item) => `${sessions.find((session) => session.id === item.id)?.title || item.id}：${item.error}`).join("；"),
+        });
+      }
       if (report.needsRecovery) toast.error("会话操作待恢复", { description: "已保留恢复所需材料。" });
       if (copied === 0 && alreadyLinked === 0 && errors.length === 0 && !report.needsRecovery) {
         toast.error("复制并关联失败", report.error ? { description: report.error } : undefined);
       }
+      // 关窗换代后，结果已经提示过；不要把新打开的弹窗关掉，也不要清掉新一次执行的 busy。
+      if (copyRequestId.current !== copyId) {
+        if (copied > 0 || alreadyLinked > 0) onDone();
+        return;
+      }
+      // 有成功复制，或没有 errors 的已存在副本：关闭并刷新。纯失败留在弹窗。
       if (copied > 0 || (alreadyLinked > 0 && errors.length === 0)) {
+        requestId.current += 1;
+        setSessionsLoading(false);
         setOpen(false);
         onDone();
       }
     } catch (error) {
+      // 换代后也要报失败：请求已经发出，静默会让用户以为没执行。
       toast.error("复制并关联失败", { description: api.asError(error) });
     } finally {
-      setBusy(false);
+      if (copyRequestId.current === copyId) setBusy(false);
     }
   }
-  const unsupportedTitle = "当前客户端暂不支持新增关联会话";
-  return <Popover open={open} onOpenChange={openChange}>
+  // 页脚摘要固定带目标账号名：摘要随勾选数与目标变化，执行前就能确认去向。
+  const summarySub = !sourceAccount
+    ? "先选择来源账号"
+    : !targetAccount
+      ? "再选择目标账号"
+      : selected.size > 0
+        ? `复制并关联到「${accountLabel(targetAccount)}」`
+        : `勾选要复制到「${accountLabel(targetAccount)}」的会话`;
+  return <Dialog open={open} onOpenChange={openChange}>
     <span className="inline-flex" title={supported ? undefined : unsupportedTitle}>
-      <PopoverTrigger asChild>
+      <DialogTrigger asChild>
         <Button size="sm" className="shrink-0 bg-brand text-brand-foreground hover:bg-brand/90" disabled={disabled || !supported} title={supported ? "新增关联会话" : unsupportedTitle}><Link2 />新增关联会话</Button>
-      </PopoverTrigger>
+      </DialogTrigger>
     </span>
-    <PopoverContent align="end" collisionPadding={12} className="w-[min(320px,calc(100vw-32px))] space-y-2.5 p-3">
-      <h3 className="text-xs font-semibold">新增关联会话</h3>
-      <p className="text-[11px] leading-4 text-muted-foreground">{title}</p>
-      <div className="space-y-1"><p className="text-[11px] font-medium">来源账号</p>
-        <Select value={sourceAccountId} onValueChange={changeSource} disabled={busy}>
-          <SelectTrigger size="sm" className="w-full min-w-0 bg-background text-xs" aria-label="选择来源账号"><SelectValue placeholder="选择 WorkBuddy 账号" /></SelectTrigger>
-          <SelectContent>{workbuddyAccounts.map((account) => <SelectItem key={account.id} value={account.id} className="text-xs">{accountLabel(account)} · {variantLabel(accountVariant(account))}</SelectItem>)}</SelectContent>
-        </Select>
-        {workbuddyAccounts.length === 0 && <p className="text-[11px] text-muted-foreground">账号库里还没有 WorkBuddy 账号。</p>}
+    <DialogContent showCloseButton={!busy} onEscapeKeyDown={blockDismissWhileBusy} onPointerDownOutside={blockDismissWhileBusy} onInteractOutside={blockDismissWhileBusy} className="flex max-h-[min(90vh,calc(100vh-2rem))] min-w-0 flex-col overflow-hidden">
+      <DialogHeader className="shrink-0">
+        <DialogTitle>新增关联会话</DialogTitle>
+        <DialogDescription>选择一个来源账号的会话，复制到目标账号并建立关联。</DialogDescription>
+      </DialogHeader>
+      {busy && <div className="absolute inset-0 z-50 flex flex-col items-center justify-center gap-3 rounded-lg bg-background/85 backdrop-blur-sm">
+        <Loader2 className="size-8 animate-spin text-primary" />
+        <p className="text-sm font-medium">正在复制并关联…</p>
+        <p className="max-w-xs text-center text-xs text-muted-foreground">正在处理中，请勿关闭窗口</p>
+      </div>}
+      <div className="flex min-h-0 flex-col gap-3 overflow-x-hidden overflow-y-auto">
+        <div className="min-w-0 space-y-1.5"><p className="text-xs font-medium">来源账号</p>
+          <Select value={sourceAccountId} onValueChange={changeSource} disabled={busy}>
+            <SelectTrigger size="sm" className="w-full min-w-0 bg-background text-xs" aria-label="选择来源账号"><SelectValue placeholder="选择 WorkBuddy 账号" /></SelectTrigger>
+            <SelectContent>{workbuddyAccounts.map((account) => <SelectItem key={account.id} value={account.id} className="text-xs">{accountLabel(account)} · {variantLabel(accountVariant(account))}</SelectItem>)}</SelectContent>
+          </Select>
+          {workbuddyAccounts.length === 0 && <p className="text-xs text-muted-foreground">账号库里还没有 WorkBuddy 账号。</p>}
+        </div>
+        <div className="min-w-0 space-y-1.5"><p className="text-xs font-medium">来源会话</p>
+          {!sourceAccountId
+            ? <p className={`flex items-center justify-center px-3 text-center text-sm text-muted-foreground ${LINKED_TREE_MIN_H}`}>先选择来源账号，再从会话树里勾选要复制的会话。</p>
+            : sessionsLoading
+              ? <div className={`flex items-center justify-center gap-2 text-sm text-muted-foreground ${LINKED_TREE_MIN_H}`}><Loader2 className="animate-spin" />正在读取会话…</div>
+              : sessionsError
+                ? <div role="alert" className={`flex flex-col items-center justify-center gap-2 px-3 text-center ${LINKED_TREE_MIN_H}`}><p className="text-sm text-destructive">{sessionsError}</p><Button variant="outline" size="sm" onClick={() => { if (sourceAccount) void loadSessions(sourceAccount); }}>重试</Button></div>
+                : sessions.length === 0
+                  ? <p className={`flex items-center justify-center px-3 text-center text-sm text-muted-foreground ${LINKED_TREE_MIN_H}`}>该账号没有可复制的会话。</p>
+                  : <SessionTreeList
+                    sessions={sessions}
+                    selected={selected}
+                    expanded={expanded}
+                    onToggleSession={toggleSession}
+                    onToggleGroup={toggleGroup}
+                    onToggleExpanded={toggleExpanded}
+                    className={`max-h-[min(22rem,45vh)] overflow-y-auto pr-1 ${LINKED_TREE_MIN_H}`}
+                  />}
+        </div>
+        <div className="min-w-0 space-y-1.5"><p className="text-xs font-medium">目标账号</p>
+          <Select value={targetAccountId} onValueChange={setTargetAccountId} disabled={busy || !sourceAccountId || targetOptions.length === 0}>
+            <SelectTrigger size="sm" className="w-full min-w-0 bg-background text-xs" aria-label="选择目标账号"><SelectValue placeholder={sourceAccountId ? "选择目标账号" : "先选择来源账号"} /></SelectTrigger>
+            <SelectContent>{targetOptions.map((account) => <SelectItem key={account.id} value={account.id} className="text-xs">{accountLabel(account)} · {variantLabel(accountVariant(account))}</SelectItem>)}</SelectContent>
+          </Select>
+        </div>
       </div>
-      <div className="space-y-1"><p className="text-[11px] font-medium">来源会话</p>
-        <Select value={sessionId} onValueChange={setSessionId} disabled={busy || sessionsLoading || sessions.length === 0}>
-          <SelectTrigger size="sm" className="w-full min-w-0 bg-background text-xs" aria-label="选择来源会话"><SelectValue placeholder={sourceAccountId ? (sessionsLoading ? "正在读取会话…" : sessions.length === 0 ? "该账号没有可复制的会话" : "选择会话") : "先选择来源账号"} /></SelectTrigger>
-          <SelectContent>{sessions.map((session) => <SelectItem key={session.id} value={session.id} className="text-xs">{session.title || session.id}</SelectItem>)}</SelectContent>
-        </Select>
-      </div>
-      <div className="space-y-1"><p className="text-[11px] font-medium">目标账号</p>
-        <Select value={targetAccountId} onValueChange={setTargetAccountId} disabled={busy || !sourceAccountId || targetOptions.length === 0}>
-          <SelectTrigger size="sm" className="w-full min-w-0 bg-background text-xs" aria-label="选择目标账号"><SelectValue placeholder={sourceAccountId ? "选择目标账号" : "先选择来源账号"} /></SelectTrigger>
-          <SelectContent>{targetOptions.map((account) => <SelectItem key={account.id} value={account.id} className="text-xs">{accountLabel(account)} · {variantLabel(accountVariant(account))}</SelectItem>)}</SelectContent>
-        </Select>
-      </div>
-      <DemoAction className="w-full"><Button size="sm" className="h-8 w-full text-xs" disabled={busy || !sourceAccount || !targetAccountId || !sessionId} onClick={() => void copyAndLink()}>{busy ? <Loader2 className="size-3.5 animate-spin" /> : <Link2 className="size-3.5" />}{busy ? "处理中…" : "复制并关联"}</Button></DemoAction>
-      <PopoverArrow />
-    </PopoverContent>
-  </Popover>;
+      <DialogFooter className="shrink-0 sm:justify-between">
+        <div className="min-w-0 space-y-0.5">
+          <div className="text-sm font-medium">已选 {selected.size} 个会话</div>
+          <div className="text-xs text-muted-foreground">{summarySub}</div>
+        </div>
+        <div className="flex shrink-0 gap-2">
+          <Button variant="outline" onClick={() => openChange(false)} disabled={busy}>取消</Button>
+          <DemoAction><Button onClick={() => void copyAndLink()} disabled={busy || !sourceAccount || !targetAccountId || sourceAccount.id === targetAccountId || selected.size === 0}>{busy ? <Loader2 className="animate-spin" /> : <Link2 />}{busy ? "处理中…" : "复制并关联"}</Button></DemoAction>
+        </div>
+      </DialogFooter>
+    </DialogContent>
+  </Dialog>;
 }
 
 function GroupSkeleton() {
