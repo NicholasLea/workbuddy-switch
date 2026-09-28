@@ -232,6 +232,7 @@ pub fn run() {
             commands::sync_session_group_unify,
             commands::sync_session_group_safe_batch,
             commands::add_session_group_member,
+            commands::unlink_session_group_member,
             commands::open_permission_settings,
             commands::check_auth_permission,
             commands::reveal_app_in_finder,

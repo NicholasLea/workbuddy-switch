@@ -608,6 +608,64 @@ pub fn add_member(
     }
 }
 
+/// Remove one member from a group, keeping the account's session content untouched.
+///
+/// Group-management data only: no client kernel runs and no session file is written. Pair
+/// baselines that reference the member are dropped together with it (`validate_store` requires
+/// pair references to stay inside the group); a group left without members is deleted.
+pub fn remove_member(
+    client: SessionClient,
+    scope: Option<WbVariant>,
+    group_id: &str,
+    member_id: &str,
+) -> Result<Value, String> {
+    client.validate_scope(scope)?;
+    let paths = client.store_paths();
+    // 单次存储锁内完成读改写：失败不写盘、不推进 revision（`with_link_store_write` 契约）。
+    let (group_removed, remaining) = session_link::with_link_store_write(&paths, |store| {
+        remove_member_in(store, client, scope, group_id, member_id)
+    })?;
+    Ok(json!({
+        "status": if group_removed { "groupRemoved" } else { "removed" },
+        "client": client.as_str(),
+        "groupId": group_id,
+        "memberId": member_id,
+        "remaining": remaining,
+    }))
+}
+
+/// [`remove_member`] 的纯变更部分：与存储 IO 分离，便于用固定夹具覆盖不变量。
+fn remove_member_in(
+    store: &mut crate::modules::session_link::LinkStore,
+    client: SessionClient,
+    scope: Option<WbVariant>,
+    group_id: &str,
+    member_id: &str,
+) -> Result<(bool, usize), String> {
+    let group = store
+        .groups
+        .iter_mut()
+        .find(|group| group.id == group_id && group_is_in_scope(client, scope, group))
+        .ok_or_else(|| "会话关联组不存在或不属于当前客户端".to_string())?;
+    if !group
+        .members
+        .iter()
+        .any(|member| member.member_id == member_id)
+    {
+        return Err("成员不存在，请刷新后重试".to_string());
+    }
+    group.members.retain(|member| member.member_id != member_id);
+    group
+        .pair_bases
+        .retain(|pair| !pair.member_ids.iter().any(|id| id == member_id));
+    let remaining = group.members.len();
+    let group_removed = remaining == 0;
+    if group_removed {
+        store.groups.retain(|group| group.id != group_id);
+    }
+    Ok((group_removed, remaining))
+}
+
 #[derive(Debug, Clone)]
 struct PairContext {
     group: LinkGroup,
@@ -1580,6 +1638,253 @@ mod tests {
     fn workspace_label_never_exposes_or_guesses_a_path() {
         assert_eq!(basename("C:\\users\\private\\project"), "project");
         assert_eq!(basename("/users/private/project/"), "project");
+    }
+
+    /// TempDir + injected store root: link-store tests must never touch the real `~/.wb-switch`.
+    struct TempStore {
+        dir: PathBuf,
+        paths: SessionPaths,
+    }
+
+    impl TempStore {
+        fn new(name: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "wb_switch_groups_{}_{name}",
+                uuid::Uuid::new_v4().simple()
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            let paths = SessionPaths {
+                store_root: dir.join("store"),
+                data_root: dir.join("data"),
+                auth_file: dir.join("auth.info"),
+                link_namespace: crate::modules::session::LinkNamespace::WorkBuddy,
+            };
+            std::fs::create_dir_all(&paths.store_root).unwrap();
+            Self { dir, paths }
+        }
+
+        fn seed(&self, groups: Vec<LinkGroup>) {
+            let store = crate::modules::session_link::LinkStore {
+                version: crate::modules::session_link::LINK_STORE_VERSION,
+                revision: 1,
+                groups,
+            };
+            std::fs::write(
+                self.paths.session_links_file(),
+                serde_json::to_string_pretty(&store).unwrap(),
+            )
+            .unwrap();
+        }
+
+        fn store(&self) -> crate::modules::session_link::LinkStore {
+            match session_link::load_store(&self.paths) {
+                StoreState::Ready(store) => store,
+                other => panic!("存储应为可读状态：{other:?}"),
+            }
+        }
+    }
+
+    impl Drop for TempStore {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    fn stored_member(member_id: &str, uid: &str, state: MemberState) -> LinkMember {
+        LinkMember {
+            member_id: member_id.to_string(),
+            account_id: Some(format!("account-{uid}")),
+            uid: uid.to_string(),
+            session_id: format!("session-{uid}"),
+            variant: Some(WbVariant::Cn),
+            state,
+            linked_at: 1,
+            last_synced_at: None,
+        }
+    }
+
+    fn remove_member_at(paths: &SessionPaths, group_id: &str, member_id: &str) -> Value {
+        let (group_removed, remaining) = session_link::with_link_store_write(paths, |store| {
+            super::remove_member_in(store, SessionClient::Workbuddy, None, group_id, member_id)
+        })
+        .unwrap();
+        json!({
+            "status": if group_removed { "groupRemoved" } else { "removed" },
+            "remaining": remaining,
+        })
+    }
+
+    #[test]
+    fn removing_a_member_drops_its_pair_bases_and_keeps_the_rest() {
+        let store = TempStore::new("remove-member");
+        let mut group = LinkGroup {
+            id: "g-1".to_string(),
+            variant: WbVariant::Cn,
+            created_at: 1,
+            members: vec![
+                stored_member("m-a", "uid-a", MemberState::Active),
+                stored_member("m-b", "uid-b", MemberState::Active),
+                stored_member("m-c", "uid-c", MemberState::Stale),
+            ],
+            pair_bases: Vec::new(),
+        };
+        for (left, right, ref_name) in [
+            ("m-a", "m-b", "base-ab"),
+            ("m-a", "m-c", "base-ac"),
+            ("m-b", "m-c", "base-bc"),
+        ] {
+            let (first, second) = session_link::pair_key(left, right);
+            group
+                .pair_bases
+                .push(crate::modules::session_link::PairBase {
+                    member_ids: [first, second],
+                    baseline_ref: ref_name.to_string(),
+                    normalization_version: 1,
+                });
+        }
+        store.seed(vec![group]);
+
+        let result = remove_member_at(&store.paths, "g-1", "m-a");
+
+        assert_eq!(result["status"], "removed");
+        assert_eq!(result["remaining"], 2);
+        let saved = store.store();
+        assert_eq!(saved.groups.len(), 1);
+        let members = &saved.groups[0].members;
+        assert_eq!(members.len(), 2);
+        assert!(members.iter().all(|member| member.member_id != "m-a"));
+        let refs = saved.groups[0]
+            .pair_bases
+            .iter()
+            .map(|pair| pair.baseline_ref.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(refs, vec!["base-bc"]);
+        assert_eq!(saved.revision, 2);
+        assert!(session_link::validate_store(&saved).is_ok());
+    }
+
+    #[test]
+    fn removing_a_superseded_member_keeps_the_group() {
+        // 共同旧版 / 已替代成员同样可移除：组保留，remaining 是剩余人数，引用它的配对基线被清掉。
+        let store = TempStore::new("remove-superseded");
+        let mut group = LinkGroup {
+            id: "g-1".to_string(),
+            variant: WbVariant::Cn,
+            created_at: 1,
+            members: vec![
+                stored_member("m-a", "uid-a", MemberState::Active),
+                stored_member("m-b", "uid-b", MemberState::Active),
+                stored_member("m-old", "uid-old", MemberState::Superseded),
+            ],
+            pair_bases: Vec::new(),
+        };
+        for (left, right, ref_name) in [
+            ("m-a", "m-b", "base-ab"),
+            ("m-a", "m-old", "base-a-old"),
+            ("m-b", "m-old", "base-b-old"),
+        ] {
+            let (first, second) = session_link::pair_key(left, right);
+            group
+                .pair_bases
+                .push(crate::modules::session_link::PairBase {
+                    member_ids: [first, second],
+                    baseline_ref: ref_name.to_string(),
+                    normalization_version: 1,
+                });
+        }
+        store.seed(vec![group]);
+
+        let result = remove_member_at(&store.paths, "g-1", "m-old");
+
+        assert_eq!(result["status"], "removed");
+        assert_eq!(result["remaining"], 2);
+        let saved = store.store();
+        assert_eq!(saved.groups.len(), 1);
+        assert_eq!(saved.groups[0].id, "g-1");
+        assert!(saved.groups[0]
+            .members
+            .iter()
+            .all(|member| member.member_id != "m-old"));
+        let refs = saved.groups[0]
+            .pair_bases
+            .iter()
+            .map(|pair| pair.baseline_ref.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(refs, vec!["base-ab"]);
+        assert!(session_link::validate_store(&saved).is_ok());
+    }
+
+    #[test]
+    fn removing_the_last_member_deletes_the_group() {
+        let store = TempStore::new("remove-last");
+        store.seed(vec![
+            LinkGroup {
+                id: "g-1".to_string(),
+                variant: WbVariant::Cn,
+                created_at: 1,
+                members: vec![stored_member("m-a", "uid-a", MemberState::Active)],
+                pair_bases: Vec::new(),
+            },
+            LinkGroup {
+                id: "g-2".to_string(),
+                variant: WbVariant::Cn,
+                created_at: 1,
+                members: vec![stored_member("m-z", "uid-z", MemberState::Active)],
+                pair_bases: Vec::new(),
+            },
+        ]);
+
+        let result = remove_member_at(&store.paths, "g-1", "m-a");
+
+        assert_eq!(result["status"], "groupRemoved");
+        assert_eq!(result["remaining"], 0);
+        let saved = store.store();
+        assert_eq!(saved.groups.len(), 1);
+        assert_eq!(saved.groups[0].id, "g-2");
+        assert_eq!(saved.revision, 2);
+        assert!(session_link::validate_store(&saved).is_ok());
+    }
+
+    #[test]
+    fn removing_an_unknown_group_or_member_reports_a_readable_error() {
+        let store = TempStore::new("remove-unknown");
+        store.seed(vec![LinkGroup {
+            id: "g-1".to_string(),
+            variant: WbVariant::Cn,
+            created_at: 1,
+            members: vec![stored_member("m-a", "uid-a", MemberState::Active)],
+            pair_bases: Vec::new(),
+        }]);
+
+        let missing_group = session_link::with_link_store_write(&store.paths, |link_store| {
+            super::remove_member_in(link_store, SessionClient::Workbuddy, None, "missing", "m-a")
+        })
+        .unwrap_err();
+        assert_eq!(missing_group, "会话关联组不存在或不属于当前客户端");
+
+        let missing_member = session_link::with_link_store_write(&store.paths, |link_store| {
+            super::remove_member_in(link_store, SessionClient::Workbuddy, None, "g-1", "nope")
+        })
+        .unwrap_err();
+        assert_eq!(missing_member, "成员不存在，请刷新后重试");
+
+        // 失败的读改写不得落盘，更不得推进 revision。
+        let saved = store.store();
+        assert_eq!(saved.revision, 1);
+        assert_eq!(saved.groups[0].members.len(), 1);
+        assert!(session_link::validate_store(&saved).is_ok());
+    }
+
+    #[test]
+    fn unlink_rejects_invalid_scope_combinations() {
+        let vscode =
+            remove_member(SessionClient::VscodeExt, Some(WbVariant::Ai), "g-1", "m-a").unwrap_err();
+        assert!(vscode.contains("只有 CodeBuddy IDE"));
+        let workbuddy =
+            remove_member(SessionClient::Workbuddy, Some(WbVariant::Cn), "g-1", "m-a").unwrap_err();
+        assert!(workbuddy.contains("只有 CodeBuddy IDE"));
+        let ide = remove_member(SessionClient::CodebuddyIde, None, "g-1", "m-a").unwrap_err();
+        assert!(ide.contains("必须指定 cn 或 ai"));
     }
 
     #[test]

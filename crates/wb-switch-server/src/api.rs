@@ -157,6 +157,10 @@ pub fn router() -> Router {
             "/api/session-groups/add",
             post(api_add_session_group_member),
         )
+        .route(
+            "/api/session-groups/unlink",
+            post(api_unlink_session_group_member),
+        )
         .route("/api/checkin/status", get(api_checkin_status))
         .route("/api/credits", post(api_credits))
         .route("/api/credits/stats", get(api_credit_statistics))
@@ -1170,6 +1174,20 @@ async fn api_add_session_group_member(Json(body): Json<Value>) -> Response {
             .unwrap_or(""),
     );
     match session_groups::add_member(client, scope, args.0, args.1, args.2) {
+        Ok(value) => json_ok(value),
+        Err(error) => json_err(error, StatusCode::BAD_REQUEST),
+    }
+}
+
+/// 取消关联：只解除管理关系，不触碰账号内的会话内容。
+async fn api_unlink_session_group_member(Json(body): Json<Value>) -> Response {
+    let (client, scope) = match session_group_request(&body) {
+        Ok(value) => value,
+        Err(error) => return json_err(error, StatusCode::BAD_REQUEST),
+    };
+    let group_id = body.get("groupId").and_then(Value::as_str).unwrap_or("");
+    let member_id = body.get("memberId").and_then(Value::as_str).unwrap_or("");
+    match session_groups::remove_member(client, scope, group_id, member_id) {
         Ok(value) => json_ok(value),
         Err(error) => json_err(error, StatusCode::BAD_REQUEST),
     }

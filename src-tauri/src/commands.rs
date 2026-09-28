@@ -868,6 +868,23 @@ pub async fn add_session_group_member(
     .map_err(|error| error.to_string())?
 }
 
+/// 取消关联：从会话组移除一个成员，只解除管理关系，不删除账号内的会话内容。
+#[tauri::command(rename_all = "camelCase")]
+pub async fn unlink_session_group_member(
+    client: String,
+    variant_scope: Option<String>,
+    group_id: String,
+    member_id: String,
+) -> Result<Value, String> {
+    let client = session_groups::SessionClient::parse(&client)?;
+    let scope = session_groups::parse_variant_scope(variant_scope.as_deref())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        session_groups::remove_member(client, scope, &group_id, &member_id)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
 // ---------------------------------------------------------------------------
 // 阶段 3：签到 + token 刷新
 // ---------------------------------------------------------------------------
