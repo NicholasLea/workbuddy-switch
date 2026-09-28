@@ -4,6 +4,7 @@ import { DemoAction } from "@/components/demo-action";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
+import { Popover, PopoverAnchor, PopoverArrow, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { accountVariant, variantLabel } from "@/lib/variant";
@@ -25,9 +26,11 @@ export interface GroupDetailPanelProps {
   onClose: () => void;
   onRetry: () => void;
   onPreview: (member: SessionGroupMemberDetail) => void;
-  onSync: (member: SessionGroupMemberDetail, mode: "fastForward" | "overwrite") => void;
+  // Both handlers resolve when the page finished its toast/reload work, so the panel can
+  // close the popover only after the operation (success or failure) is done.
+  onSync: (member: SessionGroupMemberDetail, mode: "fastForward" | "overwrite") => Promise<void>;
   onBatchSync: () => void;
-  onAdd: () => void;
+  onAdd: () => Promise<void>;
   addOpen: boolean;
   setAddOpen: (open: boolean) => void;
   fullPage: boolean;
@@ -39,11 +42,9 @@ const clientNames: Record<SessionGroupClient, string> = {
 
 export function GroupDetailPanel(props: GroupDetailPanelProps) {
   const { detail } = props;
-  const addRef = useRef<HTMLDivElement>(null);
   const panelRef = useRef<HTMLElement>(null);
   const [wide, setWide] = useState(false);
   const [operationTarget, setOperationTarget] = useState("");
-  const operationRef = useRef<HTMLDivElement>(null);
   const graphRef = useRef<HTMLDivElement>(null);
   const [connections, setConnections] = useState<{ path: string; x: number; y: number; hx: number; hy: number }[]>([]);
   useEffect(() => {
@@ -85,9 +86,6 @@ export function GroupDetailPanel(props: GroupDetailPanelProps) {
     observer.observe(panelRef.current);
     return () => observer.disconnect();
   }, []);
-  useEffect(() => {
-    if (props.addOpen && detail) addRef.current?.scrollIntoView({ block: "nearest" });
-  }, [props.addOpen, detail]);
 
   const active = detail?.members.filter((member) => member.linkState === "active") ?? [];
   const equal = detail?.summaryStatus === "latest" && active.length > 0;
@@ -107,18 +105,27 @@ export function GroupDetailPanel(props: GroupDetailPanelProps) {
     props.setAddOpen(false);
     setOperationTarget(member.memberId);
     props.setSourceMemberId(batchSource?.memberId ?? sourceOptions.find((item) => item.memberId !== member.memberId)?.memberId ?? "");
-    requestAnimationFrame(() => operationRef.current?.scrollIntoView({ block: "nearest" }));
   }
-  const target = active.find((member) => member.memberId === operationTarget);
-  const operationPreview = target ? props.previews[target.memberId] : undefined;
-  const currentPreview = operationPreview?.sourceMemberId === props.sourceMemberId
-    && operationPreview.targetMemberId === target?.memberId
-    && operationPreview.groupId === detail?.groupId
-    && operationPreview.client === props.client ? operationPreview : undefined;
+  // A stored preview is only valid for the exact source/target/group/client it was requested for.
+  function memberPreview(member: SessionGroupMemberDetail): SessionGroupPairPreview | undefined {
+    const preview = props.previews[member.memberId];
+    return preview && preview.sourceMemberId === props.sourceMemberId
+      && preview.targetMemberId === member.memberId
+      && preview.groupId === detail?.groupId
+      && preview.client === props.client ? preview : undefined;
+  }
+  // Close the popover after the page handler settled; it resolves on failure too and keeps the toast.
+  async function completeAdd() {
+    await props.onAdd();
+    props.setAddOpen(false);
+  }
+  async function completeSync(member: SessionGroupMemberDetail, mode: "fastForward" | "overwrite") {
+    await props.onSync(member, mode);
+    setOperationTarget("");
+  }
   function openAdd() {
     setOperationTarget("");
     props.setAddOpen(true);
-    requestAnimationFrame(() => addRef.current?.scrollIntoView({ block: "nearest" }));
   }
   function sourceSelect(label: string) {
     return <Select value={selectedSource?.memberId ?? ""} onValueChange={props.setSourceMemberId} disabled={props.busy || sourceOptions.length === 0}>
@@ -167,21 +174,38 @@ export function GroupDetailPanel(props: GroupDetailPanelProps) {
             {detail.members.map((member, index) => {
               const isActive = member.linkState === "active";
               const canInspect = isActive && !equal && member.memberId !== batchSource?.memberId;
+              // Any active member can become the operation target after 交换来源与目标, so every
+              // active card hosts a popover; a card without the entry button only needs an
+              // invisible anchor for that swapped state.
+              const canHostOperation = isActive && !equal;
               const status = member.linkState === "active" ? member.versionStatus : member.linkState;
+              const preview = memberPreview(member);
+              const conflictTitle = detail.summaryStatus === "diverge" ? "处理分歧" : "检查副本差异";
               return <li key={member.memberId} className="relationship-branch" style={{ gridColumn: index < Math.ceil(detail.members.length / 2) ? 1 : 3, gridRow: index % Math.ceil(detail.members.length / 2) + 1 }} data-session-member={member.memberId} data-link-state={member.linkState}>
-                <article className={`relative min-w-0 rounded-lg border bg-card p-3.5 shadow-xs ${isActive ? "border-border" : "border-dashed border-border text-muted-foreground"}`}>
-                  <div className="flex min-w-0 flex-wrap items-center gap-2">
-                    <h4 className="min-w-0 break-words text-base font-semibold [overflow-wrap:anywhere]">{member.accountName}</h4>
-                    <Badge variant="secondary" className="shrink-0 text-[11px]">{variantLabel(member.variant)}</Badge>
-                  </div>
-                  <div className="mt-1.5 flex flex-wrap items-center justify-between gap-2"><span className="text-[13px] tabular-nums text-muted-foreground">{member.recordCount == null ? "内容条数无法确认" : `${member.recordCount} 条内容`}</span><MemberStatus status={status} equal={equal} /></div>
-                  <Collapsible className="mt-1">
-                    <div className="flex flex-wrap items-center justify-between gap-x-2"><p className="text-[13px] text-muted-foreground">{formatDate(member.updatedAt)}</p><CollapsibleTrigger asChild><Button variant="ghost" size="sm" className="h-6 gap-1 px-0 text-[13px] text-brand">副本详情<ChevronDown className="size-3" /></Button></CollapsibleTrigger></div>
-                    <CollapsibleContent className="space-y-1 py-2 text-xs leading-5 text-muted-foreground"><p className="break-words">{member.projectLabel || "未标记工作区"}</p><p className="break-words">{member.reason}</p></CollapsibleContent>
-                  </Collapsible>
-                  {isActive && member.versionStatus === "behind" && batchSource && <p className="mt-2 flex items-start gap-1 text-xs leading-5 text-muted-foreground"><ArrowRight className="mt-0.5 size-3.5 shrink-0" /><span className="break-words">可从「{batchSource.accountName}」同步</span></p>}
-                  {canInspect && <Button variant="outline" size="sm" className="mt-2 h-7 text-xs" disabled={props.busy} onClick={() => openOperation(member)}>{member.versionStatus === "diverge" ? "处理分歧" : "检查差异"}</Button>}
-                </article>
+                <Popover open={operationTarget === member.memberId} onOpenChange={(open) => { if (!open) setOperationTarget(""); }}>
+                  <article className={`relative min-w-0 rounded-lg border bg-card p-3.5 shadow-xs ${isActive ? "border-border" : "border-dashed border-border text-muted-foreground"}`}>
+                    <div className="flex min-w-0 flex-wrap items-center gap-2">
+                      <h4 className="min-w-0 break-words text-base font-semibold [overflow-wrap:anywhere]">{member.accountName}</h4>
+                      <Badge variant="secondary" className="shrink-0 text-[11px]">{variantLabel(member.variant)}</Badge>
+                    </div>
+                    <div className="mt-1.5 flex flex-wrap items-center justify-between gap-2"><span className="text-[13px] tabular-nums text-muted-foreground">{member.recordCount == null ? "内容条数无法确认" : `${member.recordCount} 条内容`}</span><MemberStatus status={status} equal={equal} /></div>
+                    <Collapsible className="mt-1">
+                      <div className="flex flex-wrap items-center justify-between gap-x-2"><p className="text-[13px] text-muted-foreground">{formatDate(member.updatedAt)}</p><CollapsibleTrigger asChild><Button variant="ghost" size="sm" className="h-6 gap-1 px-0 text-[13px] text-brand">副本详情<ChevronDown className="size-3" /></Button></CollapsibleTrigger></div>
+                      <CollapsibleContent className="space-y-1 py-2 text-xs leading-5 text-muted-foreground"><p className="break-words">{member.projectLabel || "未标记工作区"}</p><p className="break-words">{member.reason}</p></CollapsibleContent>
+                    </Collapsible>
+                    {isActive && member.versionStatus === "behind" && batchSource && <p className="mt-2 flex items-start gap-1 text-xs leading-5 text-muted-foreground"><ArrowRight className="mt-0.5 size-3.5 shrink-0" /><span className="break-words">可从「{batchSource.accountName}」同步</span></p>}
+                    {canInspect && <PopoverTrigger asChild><Button variant="outline" size="sm" className="mt-2 h-7 text-xs" disabled={props.busy} onClick={() => openOperation(member)}>{member.versionStatus === "diverge" ? "处理分歧" : "检查差异"}</Button></PopoverTrigger>}
+                    {canHostOperation && !canInspect && <PopoverAnchor asChild><span aria-hidden className="block h-0 w-full" /></PopoverAnchor>}
+                  </article>
+                  {canHostOperation && <PopoverContent data-conflict-flow side="top" collisionPadding={12} aria-label={conflictTitle} className="w-[min(360px,calc(100vw-32px))] space-y-3">
+                    <div className="flex items-center justify-between gap-2"><h3 className="text-sm font-semibold">{conflictTitle}</h3><Button variant="ghost" size="sm" onClick={() => setOperationTarget("")}>取消</Button></div>
+                    <p className="text-xs text-muted-foreground">仅选择本次操作的来源和目标。检查不会修改任何副本。</p>
+                    <div className="grid gap-3 sm:grid-cols-2"><div className="space-y-1"><p className="text-xs">来源账号</p>{sourceSelect("选择比较来源")}</div><div className="space-y-1"><p className="text-xs">目标账号</p><Select value={operationTarget} onValueChange={setOperationTarget} disabled={props.busy}><SelectTrigger className="w-full" aria-label="选择比较目标"><SelectValue /></SelectTrigger><SelectContent>{active.filter((item) => item.memberId !== props.sourceMemberId).map((item) => <SelectItem key={item.memberId} value={item.memberId}>{item.accountName}</SelectItem>)}</SelectContent></Select></div></div>
+                    <div className="flex flex-wrap gap-2"><Button variant="outline" size="sm" disabled={props.busy || !member.canBeSource || !selectedSource || member.memberId === selectedSource.memberId} onClick={() => { const previous = props.sourceMemberId; props.setSourceMemberId(member.memberId); setOperationTarget(previous); }}><ArrowDownUp />交换来源与目标</Button><Button size="sm" disabled={props.busy || !selectedSource || member.memberId === selectedSource.memberId || !!props.pendingMember} onClick={() => props.onPreview(member)}>{props.pendingMember ? <Loader2 className="animate-spin" /> : <RefreshCw />}检查差异</Button></div>
+                    {preview && <div className="space-y-2"><p className="text-sm">{preview.reason}</p>{preview.availableModes.includes("overwrite") && <p className="text-sm text-destructive">目标独有 {preview.extraTargetCount} 条内容将被替换，无法通过本工具撤销。</p>}<div className="flex gap-2">{preview.previewToken && preview.availableModes.includes("fastForward") && <DemoAction><Button disabled={props.busy} onClick={() => void completeSync(member, "fastForward")}>同步到目标</Button></DemoAction>}{preview.previewToken && preview.availableModes.includes("overwrite") && <DemoAction><Button variant="destructive" disabled={props.busy} onClick={() => void completeSync(member, "overwrite")}>覆盖目标</Button></DemoAction>}</div></div>}
+                    <PopoverArrow />
+                  </PopoverContent>}
+                </Popover>
               </li>;
             })}
           </ul>
@@ -189,37 +213,31 @@ export function GroupDetailPanel(props: GroupDetailPanelProps) {
           {equal && <p className="mt-4 flex items-center justify-center gap-2 text-xs leading-5 text-muted-foreground"><Check className="size-4 shrink-0 text-brand" />有效关联内容一致，无需同步</p>}
         </div>
         <p className="mt-3 flex items-start gap-2 text-xs leading-5 text-muted-foreground"><Info className="mt-0.5 size-3.5 shrink-0" />{equal ? "账号更新后，可重新检查同步方向与内容差异。" : "连线表示账号关联；同步方向以内容检查结果为准。"}</p>
-        {target && <div ref={operationRef} className="mt-4 space-y-3 rounded-lg border border-border bg-muted/20 p-4" data-conflict-flow>
-          <div className="flex items-center justify-between"><h3 className="text-sm font-semibold">{detail.summaryStatus === "diverge" ? "处理分歧" : "检查副本差异"}</h3><Button variant="ghost" size="sm" onClick={() => setOperationTarget("")}>取消</Button></div>
-          <p className="text-xs text-muted-foreground">仅选择本次操作的来源和目标。检查不会修改任何副本。</p>
-          <div className="grid gap-3 sm:grid-cols-2"><div className="space-y-1"><p className="text-xs">来源账号</p>{sourceSelect("选择比较来源")}</div><div className="space-y-1"><p className="text-xs">目标账号</p><Select value={operationTarget} onValueChange={setOperationTarget} disabled={props.busy}><SelectTrigger className="w-full" aria-label="选择比较目标"><SelectValue /></SelectTrigger><SelectContent>{active.filter((member) => member.memberId !== props.sourceMemberId).map((member) => <SelectItem key={member.memberId} value={member.memberId}>{member.accountName}</SelectItem>)}</SelectContent></Select></div></div>
-          <div className="flex flex-wrap gap-2"><Button variant="outline" size="sm" disabled={props.busy || !target.canBeSource || !selectedSource || target.memberId === selectedSource.memberId} onClick={() => { const previous = props.sourceMemberId; props.setSourceMemberId(target.memberId); setOperationTarget(previous); }}><ArrowDownUp />交换来源与目标</Button><Button size="sm" disabled={props.busy || !selectedSource || target.memberId === selectedSource.memberId || !!props.pendingMember} onClick={() => props.onPreview(target)}>{props.pendingMember ? <Loader2 className="animate-spin" /> : <RefreshCw />}检查差异</Button></div>
-          {currentPreview && <div className="space-y-2"><p className="text-sm">{currentPreview.reason}</p>{currentPreview.availableModes.includes("overwrite") && <p className="text-sm text-destructive">目标独有 {currentPreview.extraTargetCount} 条内容将被替换，无法通过本工具撤销。</p>}<div className="flex gap-2">{currentPreview.previewToken && currentPreview.availableModes.includes("fastForward") && <DemoAction><Button disabled={props.busy} onClick={() => props.onSync(target, "fastForward")}>同步到目标</Button></DemoAction>}{currentPreview.previewToken && currentPreview.availableModes.includes("overwrite") && <DemoAction><Button variant="destructive" disabled={props.busy} onClick={() => props.onSync(target, "overwrite")}>覆盖目标</Button></DemoAction>}</div></div>}
-        </div>}
-        <Collapsible open={props.addOpen} onOpenChange={props.setAddOpen} className="mt-4">
-          <CollapsibleContent><div ref={addRef} className="space-y-3 rounded-lg border border-brand/25 bg-brand/5 p-4">
-            <div className="flex items-center justify-between gap-2"><h3 className="text-sm font-semibold">关联新账号</h3><Button variant="ghost" size="icon" className="size-7" aria-label="收起关联表单" onClick={() => props.setAddOpen(false)}><X /></Button></div>
-            <p className="text-xs leading-5 text-muted-foreground">{equal ? "选择任一可读取的副本，复制到新账号并建立关联。" : "将所选账号的当前副本复制到新账号，并建立关联。"}</p>
-            <div className="space-y-1.5"><p className="text-xs font-medium">复制来源</p>{sourceSelect("选择复制来源")}</div>
-            <div className="space-y-1.5"><p className="text-xs font-medium">目标账号</p><Select value={props.addTargetId} onValueChange={props.setAddTargetId} disabled={props.busy || detail.addTargets.length === 0}>
-              <SelectTrigger className="w-full min-w-0 bg-background" aria-label="目标关联账号"><SelectValue placeholder="选择兼容账号" /></SelectTrigger>
-              <SelectContent>{detail.addTargets.map((account) => <SelectItem key={account.id} value={account.id}>{account.nickname || account.email || account.uid || account.id} · {variantLabel(accountVariant(account))}</SelectItem>)}</SelectContent>
-            </Select></div>
-            {detail.addTargets.length === 0 && <p className="text-xs text-muted-foreground">没有可添加的兼容账号。</p>}
-            <DemoAction className="w-full"><Button className="w-full" disabled={props.busy || !selectedSource || !props.addTargetId} onClick={props.onAdd}><Copy />{props.busy ? "处理中…" : "复制并关联"}</Button></DemoAction>
-          </div></CollapsibleContent>
-        </Collapsible>
       </>}
     </div>
-    {detail && <footer data-detail-footer className="relationship-footer shrink-0 space-y-2.5 border-t border-border/70 bg-card px-5 py-4">
-      {canBatch ? <>
-        <DemoAction className="w-full"><Button className="h-11 w-full bg-brand text-brand-foreground hover:bg-brand/90" disabled={props.busy} onClick={props.onBatchSync}><RefreshCw className={props.busy ? "animate-spin" : undefined} />同步 {behind.length} 个落后账号</Button></DemoAction>
-        <div className="flex items-center justify-between gap-2"><p className="min-w-0 truncate text-xs text-muted-foreground" title={`${batchSource.accountName} → ${behind.map((member) => member.accountName).join("、")}`}>{batchSource.accountName} → {behind.length} 个账号</p><Button variant="ghost" size="sm" className="h-7 shrink-0 px-1 text-xs" onClick={openAdd}><Plus />关联新账号</Button></div>
-      </> : <>
-        <Button className="h-11 w-full bg-brand text-brand-foreground hover:bg-brand/90" onClick={openAdd}><Link2 />关联新账号</Button>
-        <p className="text-center text-xs leading-5 text-muted-foreground">选择一个现有账号，将会话复制到新账号</p>
-      </>}
-    </footer>}
+    {detail && <Popover open={props.addOpen} onOpenChange={(open) => { if (!open) props.setAddOpen(false); }}>
+      <footer data-detail-footer className="relationship-footer shrink-0 space-y-2.5 border-t border-border/70 bg-card px-5 py-4">
+        {canBatch ? <>
+          <DemoAction className="w-full"><Button className="h-11 w-full bg-brand text-brand-foreground hover:bg-brand/90" disabled={props.busy} onClick={props.onBatchSync}><RefreshCw className={props.busy ? "animate-spin" : undefined} />同步 {behind.length} 个落后账号</Button></DemoAction>
+          <div className="flex items-center justify-between gap-2"><p className="min-w-0 truncate text-xs text-muted-foreground" title={`${batchSource.accountName} → ${behind.map((member) => member.accountName).join("、")}`}>{batchSource.accountName} → {behind.length} 个账号</p><PopoverTrigger asChild><Button variant="ghost" size="sm" className="h-7 shrink-0 px-1 text-xs" onClick={openAdd}><Plus />关联新账号</Button></PopoverTrigger></div>
+        </> : <>
+          <PopoverTrigger asChild><Button className="h-11 w-full bg-brand text-brand-foreground hover:bg-brand/90" onClick={openAdd}><Link2 />关联新账号</Button></PopoverTrigger>
+          <p className="text-center text-xs leading-5 text-muted-foreground">选择一个现有账号，将会话复制到新账号</p>
+        </>}
+      </footer>
+      <PopoverContent side="top" collisionPadding={12} aria-label="关联新账号" className="w-[min(320px,calc(100vw-32px))] space-y-3">
+        <h3 className="text-sm font-semibold">关联新账号</h3>
+        <p className="text-xs leading-5 text-muted-foreground">{equal ? "选择任一可读取的副本，复制到新账号并建立关联。" : "将所选账号的当前副本复制到新账号，并建立关联。"}</p>
+        <div className="space-y-1.5"><p className="text-xs font-medium">复制来源</p>{sourceSelect("选择复制来源")}</div>
+        <div className="space-y-1.5"><p className="text-xs font-medium">目标账号</p><Select value={props.addTargetId} onValueChange={props.setAddTargetId} disabled={props.busy || detail.addTargets.length === 0}>
+          <SelectTrigger className="w-full min-w-0 bg-background" aria-label="目标关联账号"><SelectValue placeholder="选择兼容账号" /></SelectTrigger>
+          <SelectContent>{detail.addTargets.map((account) => <SelectItem key={account.id} value={account.id}>{account.nickname || account.email || account.uid || account.id} · {variantLabel(accountVariant(account))}</SelectItem>)}</SelectContent>
+        </Select></div>
+        {detail.addTargets.length === 0 && <p className="text-xs text-muted-foreground">没有可添加的兼容账号。</p>}
+        <DemoAction className="w-full"><Button className="w-full" disabled={props.busy || !selectedSource || !props.addTargetId} onClick={() => void completeAdd()}><Copy />{props.busy ? "处理中…" : "复制并关联"}</Button></DemoAction>
+        <PopoverArrow />
+      </PopoverContent>
+    </Popover>}
   </section>;
 }
 
