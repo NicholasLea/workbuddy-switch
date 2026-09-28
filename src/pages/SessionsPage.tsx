@@ -148,16 +148,20 @@ export default function SessionsPage() {
   }, [client, scope, listContextKey]);
 
   useEffect(() => {
-    if (!selectedGroupId) {
+    // 只有弹窗打开且已选中会话组才需要详情：关闭时同样进入这里，作废在途请求并停掉加载态，
+    // 但保留已渲染内容给退场动画（重开时加载流程会清空）。
+    if (!detailOpen || !selectedGroupId) {
       detailRequestId.current += 1;
-      setDetail(null);
-      setDetailLoading(false);
-      setDetailError(null);
-      setSourceMemberId("");
-      setAddTargetId("");
       previewRequestId.current += 1;
+      setDetailLoading(false);
       setUnifyPlan(null);
       setUnifyLoading(null);
+      if (!selectedGroupId) {
+        setDetail(null);
+        setDetailError(null);
+        setSourceMemberId("");
+        setAddTargetId("");
+      }
       return;
     }
     let live = true;
@@ -181,7 +185,7 @@ export default function SessionsPage() {
       if (live && detailRequestId.current === requestId && `${contextRef.current.client}:${contextRef.current.scope ?? "all"}:${contextRef.current.selectedGroupId ?? "none"}` === key) setDetailLoading(false);
     });
     return () => { live = false; };
-  }, [client, scope, selectedGroupId, detailContextKey]);
+  }, [client, scope, selectedGroupId, detailContextKey, detailOpen]);
 
   const filteredGroups = useMemo(() => {
     const needle = query.trim().toLocaleLowerCase();
