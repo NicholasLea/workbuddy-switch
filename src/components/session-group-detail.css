@@ -1,6 +1,7 @@
 .session-detail-modal[data-slot="dialog-content"] {
   width: min(980px, calc(100vw - 40px));
   max-width: none;
+  height: min(760px, calc(100dvh - 40px));
   max-height: min(760px, calc(100dvh - 40px));
   border-radius: 12px;
 }

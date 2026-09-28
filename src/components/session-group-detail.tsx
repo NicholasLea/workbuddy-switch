@@ -168,7 +168,7 @@ export function GroupDetailPanel(props: GroupDetailPanelProps) {
         <p className="break-words">{props.error}</p><Button variant="outline" size="sm" className="h-7 text-xs" disabled={props.loading} onClick={props.onRetry}>重试</Button>
       </div>}
       {!detail && !props.error && <div aria-label="正在加载会话详情" aria-busy="true" className="space-y-3">
-        <Skeleton className="h-6 w-3/4" /><Skeleton className="h-14 w-full" /><Skeleton className="h-44 w-full" />
+        <Skeleton className="h-6 w-3/4" /><Skeleton className="h-5 w-28" /><Skeleton className="h-14 w-full" /><Skeleton className="h-5 w-32" /><Skeleton className="h-72 w-full" />
       </div>}
       {detail && <>
         <h2 className={`break-words font-semibold leading-snug tracking-tight ${wide ? "text-xl" : "text-lg"}`}>{detail.title}</h2>
@@ -176,12 +176,12 @@ export function GroupDetailPanel(props: GroupDetailPanelProps) {
           <Badge variant="success">{clientNames[props.client]}</Badge>
           <span className="flex min-w-0 items-center gap-1 text-[11px] text-muted-foreground"><Folder className="size-3 shrink-0" /><span className="truncate" title={detail.projectLabel}>{detail.projectLabel || "未标记项目"}</span></span>
         </div>
-        <Alert variant={conflict ? "destructive" : canBatch ? "warning" : equal ? "success" : "default"} className={`my-3 min-w-0 py-2.5 pr-11 ${conflict ? "border-destructive/35 bg-destructive/10 text-destructive dark:text-red-300" : canBatch ? "dark:text-amber-200" : equal ? "" : "bg-muted/70"}`} data-relationship-summary>
+        <Alert variant={conflict ? "destructive" : canBatch ? "warning" : equal ? "success" : "default"} className={`my-3 min-w-0 items-center py-2.5 pr-11 [&>svg]:translate-y-0 ${conflict ? "border-destructive/35 bg-destructive/10 text-destructive dark:text-red-300" : canBatch ? "dark:text-amber-200" : equal ? "" : "bg-muted/70"}`} data-relationship-summary>
           {conflict ? <TriangleAlert aria-hidden="true" /> : equal ? <Check aria-hidden="true" /> : <Info aria-hidden="true" />}
           <AlertTitle className="text-xs leading-4">{summary}</AlertTitle>
           {conflict && <AlertDescription className="text-[11px] leading-4 text-destructive/85 dark:text-red-200/80">{divergence ? "这些更新都包含共同旧版，但彼此内容不同，无法自动合并。请选择要保留的一份。" : "选择要保留的一份；确认后将它的内容统一到其他可验证的账号。"}</AlertDescription>}
           {equal && active[0]?.recordCount != null && <AlertDescription className="text-[11px] leading-4">{active[0].recordCount} 条内容 · 无需同步</AlertDescription>}
-          <Button variant="ghost" size="icon" className={`absolute right-2 top-2 size-7 ${conflict ? "hover:bg-destructive/10" : canBatch ? "hover:bg-amber-500/10" : "hover:bg-emerald-500/10"}`} aria-label="重新检查会话状态" title="重新检查" disabled={props.loading || props.busy} onClick={props.onRetry}><RefreshCw className={`size-3.5 ${props.loading ? "animate-spin" : ""}`} /></Button>
+          <Button variant="ghost" size="icon" className={`absolute right-2 top-1 size-7 ${conflict ? "hover:bg-destructive/10" : canBatch ? "hover:bg-amber-500/10" : "hover:bg-emerald-500/10"}`} aria-label="重新检查会话状态" title="重新检查" disabled={props.loading || props.busy} onClick={props.onRetry}><RefreshCw className={`size-3.5 ${props.loading ? "animate-spin" : ""}`} /></Button>
         </Alert>
         <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
           <div><h3 className="text-sm font-semibold">{divergence ? "内容分支图" : "会话关联图"}</h3><p className="mt-0.5 text-[11px] leading-4 text-muted-foreground">{divergence ? `共同旧版上的 ${divergence.branches.length} 条独立更新` : "同一会话，在不同账号中各有一份"}</p></div>
@@ -243,12 +243,12 @@ export function GroupDetailPanel(props: GroupDetailPanelProps) {
       <footer data-detail-footer className="relationship-footer shrink-0 space-y-1.5 border-t border-border/70 bg-card px-4 py-2.5">
         {canBatch ? <>
           <DemoAction className="w-full"><Button size="sm" className="h-8 w-full bg-brand text-xs text-brand-foreground hover:bg-brand/90" disabled={props.busy} onClick={props.onBatchSync}><RefreshCw className={`size-3.5 ${props.busy ? "animate-spin" : ""}`} />同步到 {behind.length} 个落后账号</Button></DemoAction>
-          <div className="flex items-center justify-between gap-2"><p className="min-w-0 truncate text-[11px] text-muted-foreground" title={`${batchSource.accountName} → ${behind.map((member) => member.accountName).join("、")}`}>{batchSource.accountName} → {behind.length} 个账号</p><PopoverTrigger asChild><Button variant="ghost" size="sm" className="h-6 shrink-0 px-1 text-xs" onClick={openAdd}><Plus className="size-3.5" />关联新账号</Button></PopoverTrigger></div>
+          <div className="flex items-center justify-between gap-2"><p className="min-w-0 truncate text-[11px] text-muted-foreground" title={`${batchSource.accountName} → ${behind.map((member) => member.accountName).join("、")}`}>{batchSource.accountName} → {behind.length} 个账号</p><PopoverTrigger asChild><Button variant="outline" size="sm" className="h-8 shrink-0 text-xs" disabled={detail.addTargets.length === 0} onClick={openAdd}><Plus className="size-3.5" />关联新账号</Button></PopoverTrigger></div>
         </> : conflict ? <>
           <p className="text-center text-xs text-muted-foreground">在上方选择一个副本，统一其他账号</p>
-          <PopoverTrigger asChild><Button variant="ghost" size="sm" className="h-7 w-full text-xs" onClick={openAdd}><Plus className="size-3.5" />关联新账号</Button></PopoverTrigger>
+          <PopoverTrigger asChild><Button variant="outline" size="sm" className="h-8 w-full text-xs" disabled={detail.addTargets.length === 0} onClick={openAdd}><Plus className="size-3.5" />关联新账号</Button></PopoverTrigger>
         </> : <>
-          <PopoverTrigger asChild><Button size="sm" className="h-8 w-full bg-brand text-xs text-brand-foreground hover:bg-brand/90" onClick={openAdd}><Link2 className="size-3.5" />关联新账号</Button></PopoverTrigger>
+          <PopoverTrigger asChild><Button variant="outline" size="sm" className="h-8 w-full text-xs" disabled={detail.addTargets.length === 0} onClick={openAdd}><Link2 className="size-3.5" />关联新账号</Button></PopoverTrigger>
           <p className="text-center text-[11px] leading-4 text-muted-foreground">选择一个现有账号，将会话复制到新账号</p>
         </>}
       </footer>

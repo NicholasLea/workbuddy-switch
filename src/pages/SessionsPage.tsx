@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ChevronLeft, ChevronRight, CheckCircle2, Copy, Folder, MessageCircle, Layers3, RefreshCw, Search } from "lucide-react";
+import { ChevronLeft, ChevronRight, CheckCircle2, Copy, Folder, MessageCircle, Layers3, RefreshCw, SlidersHorizontal } from "lucide-react";
 import { toast } from "sonner";
 
 import { CodeBuddyCnIdeMark, VscodeExtMark, WorkBuddyAiMark, WorkBuddyMark } from "@/components/product-marks";
@@ -7,7 +7,6 @@ import { GroupDetailPanel } from "@/components/session-group-detail";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -37,7 +36,6 @@ export default function SessionsPage() {
   const [detail, setDetail] = useState<SessionGroupDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState<string | null>(null);
-  const [query, setQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
   const [sortOrder, setSortOrder] = useState("recent");
   const [page, setPage] = useState(1);
@@ -66,6 +64,9 @@ export default function SessionsPage() {
   }
   function openDetail(id: string, copy = false) {
     openerRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    setDetail(null);
+    setDetailError(null);
+    setDetailLoading(true);
     setSelectedGroupId(id);
     setAddOpen(copy);
     setDetailOpen(true);
@@ -188,20 +189,17 @@ export default function SessionsPage() {
   }, [client, scope, selectedGroupId, detailContextKey, detailOpen]);
 
   const filteredGroups = useMemo(() => {
-    const needle = query.trim().toLocaleLowerCase();
     const result = groups.filter((group) => {
-      const matchesQuery = !needle || [group.title, group.projectLabel, ...group.accountNames].some((value) => value.toLocaleLowerCase().includes(needle));
-      const matchesStatus = statusFilter === "all" || group.summaryStatus === statusFilter;
-      return matchesQuery && matchesStatus;
+      return statusFilter === "all" || group.summaryStatus === statusFilter;
     });
     result.sort((left, right) => sortOrder === "oldest" ? left.latestActivityAt - right.latestActivityAt : left.latestActivityAt === right.latestActivityAt ? left.title.localeCompare(right.title) : right.latestActivityAt - left.latestActivityAt);
     return result;
-  }, [groups, query, statusFilter, sortOrder]);
+  }, [groups, statusFilter, sortOrder]);
   const pageCount = Math.max(1, Math.ceil(filteredGroups.length / PAGE_SIZE));
   const currentPage = Math.min(page, pageCount);
   const visibleGroups = filteredGroups.slice((currentPage - 1) * PAGE_SIZE, currentPage * PAGE_SIZE);
 
-  useEffect(() => { setPage(1); }, [query, statusFilter, sortOrder, client, scope]);
+  useEffect(() => { setPage(1); }, [statusFilter, sortOrder, client, scope]);
 
   function changeClient(value: string) {
     const next = value as SessionGroupClient;
@@ -409,23 +407,22 @@ export default function SessionsPage() {
             <Badge variant="secondary" className="h-6 min-w-6 rounded-full border-0 px-1.5 text-[11px] tabular-nums text-muted-foreground shadow-none" aria-label={`${groups.length} 个会话组`}>{groups.length}</Badge>
             <span className="text-xs text-muted-foreground">{client === "workbuddy" ? "支持国内版与国际版关联" : "按客户端独立管理"}</span>
           </div>
-          <div className="flex flex-wrap gap-3">
-            <div className="relative min-w-0 basis-48 flex-1"><Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" /><Input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索会话、项目或账号…" aria-label="搜索会话、项目或账号" className="h-10 bg-background pl-10" /></div>
-            {client === "codebuddyIde" && <Select value={variantScope} onValueChange={(value) => { setVariantScope(value as WbVariant); setSelectedGroupId(null); setDetailOpen(false); }}><SelectTrigger className="h-10 w-36 bg-background" aria-label="选择 CodeBuddy IDE 档位"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="cn">国内版</SelectItem><SelectItem value="ai">国际版</SelectItem></SelectContent></Select>}
-          </div>
           <div className="my-4 flex flex-wrap items-center justify-between gap-2">
-            <Tabs value={statusFilter} onValueChange={setStatusFilter} className="min-w-0 max-w-full gap-0">
-              <TabsList className="h-auto max-w-full flex-wrap justify-start gap-0.5" aria-label="按状态筛选">
-                {statusOptions.filter(([value]) => ["all", "behind", "diverge", "latest"].includes(value) || value === statusFilter || groups.some((group) => group.summaryStatus === value)).map(([value, label]) => <TabsTrigger key={value} value={value} className="h-8 gap-1.5 px-2.5">
-                  {label}<span className={`rounded-full px-1.5 text-[11px] tabular-nums ${statusFilter === value ? "bg-muted" : "bg-background/70"}`}>{value === "all" ? groups.length : groups.filter((group) => group.summaryStatus === value).length}</span>
-                </TabsTrigger>)}
-              </TabsList>
-            </Tabs>
-            <Select value={sortOrder} onValueChange={setSortOrder}><SelectTrigger size="sm" className="w-28 border-0 bg-transparent shadow-none" aria-label="排序方式"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="recent">最近更新</SelectItem><SelectItem value="oldest">最早更新</SelectItem></SelectContent></Select>
+            <div className="flex min-w-0 max-w-full flex-wrap items-center gap-2">
+              {client === "codebuddyIde" && <Select value={variantScope} onValueChange={(value) => { setVariantScope(value as WbVariant); setSelectedGroupId(null); setDetailOpen(false); }}><SelectTrigger size="sm" className="w-32 bg-background text-xs" aria-label="选择 CodeBuddy IDE 档位"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="cn">国内版</SelectItem><SelectItem value="ai">国际版</SelectItem></SelectContent></Select>}
+              <Tabs value={statusFilter} onValueChange={setStatusFilter} className="min-w-0 max-w-full gap-0">
+                <TabsList className="h-auto max-w-full flex-wrap justify-start gap-0.5" aria-label="按状态筛选">
+                  {statusOptions.filter(([value]) => ["all", "behind", "diverge", "latest"].includes(value) || value === statusFilter || groups.some((group) => group.summaryStatus === value)).map(([value, label]) => <TabsTrigger key={value} value={value} className="h-8 gap-1.5 px-2.5">
+                    {label}<span className={`rounded-full px-1.5 text-[11px] tabular-nums ${statusFilter === value ? "bg-muted" : "bg-background/70"}`}>{value === "all" ? groups.length : groups.filter((group) => group.summaryStatus === value).length}</span>
+                  </TabsTrigger>)}
+                </TabsList>
+              </Tabs>
+            </div>
+            <Select value={sortOrder} onValueChange={setSortOrder}><SelectTrigger size="sm" className="w-auto min-w-28 gap-1.5 border-0 bg-transparent px-2 text-xs shadow-none" aria-label="排序方式"><SlidersHorizontal className="size-4" aria-hidden="true" /><SelectValue /></SelectTrigger><SelectContent><SelectItem value="recent">最近更新</SelectItem><SelectItem value="oldest">最早更新</SelectItem></SelectContent></Select>
           </div>
           {(storeStatus === "unavailable" || storeError) && <p role="status" className="mb-3 rounded-lg border border-amber-500/30 p-3 text-sm text-muted-foreground">{storeError ?? "关联组存储暂不可用，当前只展示可读取的数据。"}</p>}
           {loadError && <div role="alert" className="mb-3 rounded-lg border border-destructive/30 p-3 text-sm text-destructive">{loadError}<Button variant="outline" size="sm" className="ml-2" onClick={() => void reloadGroups()}>重试</Button></div>}
-          {loading ? <GroupSkeleton /> : filteredGroups.length === 0 ? <div className="flex min-h-56 flex-col items-center justify-center rounded-xl border border-dashed p-6 text-center"><Layers3 className="size-7 text-muted-foreground" /><h3 className="mt-3 text-sm font-medium">{groups.length === 0 ? "还没有关联会话组" : "没有符合条件的会话"}</h3><p className="mt-2 text-sm text-muted-foreground">{groups.length === 0 ? "从账号切换时复制会话后，关联组会显示在这里。" : "试试其它关键词或筛选条件。"}</p></div> : <div className={`grid min-w-0 gap-3 ${contentWidth >= 600 ? "grid-cols-2" : "grid-cols-1"}`}>{visibleGroups.map((group) => <SessionGroupCard key={group.key} group={group} selected={group.groupId === selectedGroupId} onSelect={() => openDetail(group.groupId)} />)}</div>}
+          {loading ? <GroupSkeleton /> : filteredGroups.length === 0 ? <div className="flex min-h-56 flex-col items-center justify-center rounded-xl border border-dashed p-6 text-center"><Layers3 className="size-7 text-muted-foreground" /><h3 className="mt-3 text-sm font-medium">{groups.length === 0 ? "还没有关联会话组" : "没有符合条件的会话"}</h3><p className="mt-2 text-sm text-muted-foreground">{groups.length === 0 ? "从账号切换时复制会话后，关联组会显示在这里。" : "试试其它筛选条件。"}</p></div> : <div className={`grid min-w-0 gap-3 ${contentWidth >= 600 ? "grid-cols-2" : "grid-cols-1"}`}>{visibleGroups.map((group) => <SessionGroupCard key={group.key} group={group} selected={group.groupId === selectedGroupId} onSelect={() => openDetail(group.groupId)} />)}</div>}
           {!loading && filteredGroups.length > 0 && <div className="mt-6 flex flex-wrap items-center justify-between gap-3 text-xs text-muted-foreground"><span>显示 {(currentPage - 1) * PAGE_SIZE + 1}–{Math.min(currentPage * PAGE_SIZE, filteredGroups.length)}，共 {filteredGroups.length} 个会话</span><nav aria-label="会话分页" className="flex flex-wrap items-center gap-1.5"><Button variant="outline" size="icon" className="size-8" aria-label="上一页" disabled={currentPage <= 1} onClick={() => setPage(currentPage - 1)}><ChevronLeft /></Button>{pages.map((value, index) => <span key={value} className="flex items-center gap-1.5">{index > 0 && value - pages[index - 1] > 1 && <span>…</span>}<Button variant={value === currentPage ? "default" : "outline"} className={`size-8 p-0 ${value === currentPage ? "bg-brand text-brand-foreground hover:bg-brand/90" : ""}`} aria-label={`第 ${value} 页`} aria-current={value === currentPage ? "page" : undefined} onClick={() => setPage(value)}>{value}</Button></span>)}<Button variant="outline" size="icon" className="size-8" aria-label="下一页" disabled={currentPage >= pageCount} onClick={() => setPage(currentPage + 1)}><ChevronRight /></Button></nav></div>}
         </section>
       </div>
