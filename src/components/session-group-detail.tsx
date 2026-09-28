@@ -1,15 +1,17 @@
 import { useEffect, useRef, useState } from "react";
-import { ArrowRight, Check, ChevronDown, ChevronLeft, Copy, FileText, Folder, Info, Link2, Loader2, Plus, RefreshCw, TriangleAlert, X } from "lucide-react";
+import { ArrowRight, Check, ChevronDown, ChevronLeft, Copy, Ellipsis, FileText, Folder, Info, Link2, Loader2, Plus, RefreshCw, TriangleAlert, Unlink, X } from "lucide-react";
 import { DemoAction } from "@/components/demo-action";
+import { CodeBuddyAiIdeMark, CodeBuddyCnIdeMark, VscodeExtAiMark, VscodeExtMark, WorkBuddyAiMark, WorkBuddyMark } from "@/components/product-marks";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { AlertDialog, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Popover, PopoverArrow, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
-import { accountVariant, variantLabel } from "@/lib/variant";
+import { accountVariant, variantIsIntl, variantLabel } from "@/lib/variant";
 import type { SessionGroupClient, SessionGroupCurrentAccount, SessionGroupDetail, SessionGroupMemberDetail, SessionGroupUnifyPlan } from "@/lib/types";
 import "./session-group-detail.css";
 
@@ -33,6 +35,7 @@ export interface GroupDetailPanelProps {
   onConfirmUnify: () => Promise<void>;
   onBatchSync: () => void;
   onAdd: () => Promise<void>;
+  onUnlinkMember: (member: SessionGroupMemberDetail) => Promise<void>;
   addOpen: boolean;
   setAddOpen: (open: boolean) => void;
   fullPage: boolean;
@@ -48,6 +51,10 @@ export function GroupDetailPanel(props: GroupDetailPanelProps) {
   const { detail } = props;
   const panelRef = useRef<HTMLElement>(null);
   const [wide, setWide] = useState(false);
+  // 只存被点成员 id，确认框的成员由当前 detail 派生：浮层不会停留在过期数据上。
+  const [unlinkTargetId, setUnlinkTargetId] = useState<string | null>(null);
+  const [unlinkBusy, setUnlinkBusy] = useState(false);
+  const unlinkTarget = detail?.members.find((member) => member.memberId === unlinkTargetId) ?? null;
   const graphRef = useRef<HTMLDivElement>(null);
   const [connections, setConnections] = useState<GraphLine[]>([]);
   useEffect(() => {
@@ -149,6 +156,19 @@ export function GroupDetailPanel(props: GroupDetailPanelProps) {
   function openAdd() {
     props.setAddOpen(true);
   }
+  // 确认框成员来自当前 detail。成功后父层刷新会让成员消失；失败时父层 toast 并 reject，框留着可重试。
+  async function completeUnlink() {
+    if (!unlinkTarget || unlinkBusy) return;
+    setUnlinkBusy(true);
+    try {
+      await props.onUnlinkMember(unlinkTarget);
+      setUnlinkTargetId(null);
+    } catch {
+      // 父层已 toast。
+    } finally {
+      setUnlinkBusy(false);
+    }
+  }
   function sourceSelect(label: string) {
     return <Select value={selectedSource?.memberId ?? ""} onValueChange={props.setSourceMemberId} disabled={props.busy || sourceOptions.length === 0}>
       <SelectTrigger size="sm" className="w-full min-w-0 bg-background text-xs" aria-label={label}><SelectValue placeholder="选择可读取的账号副本" /></SelectTrigger>
@@ -213,9 +233,19 @@ export function GroupDetailPanel(props: GroupDetailPanelProps) {
               const commonCount = divergence?.commonMemberIds.length ?? Math.ceil(displayMembers.length / 2);
               return <li key={member.memberId} className="relationship-branch" style={{ gridColumn: index < commonCount ? 1 : 3, gridRow: index < commonCount ? index + 1 : index - commonCount + 1 }} data-session-member={member.memberId} data-link-state={member.linkState} data-graph-role={graphRole} data-branch-index={branchIndex}>
                   <article className={`relative min-w-0 rounded-lg border bg-card p-2.5 shadow-xs ${isActive ? "border-border" : "border-dashed border-border text-muted-foreground"}`}>
-                    <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+                    <div className="flex min-w-0 items-start justify-between gap-2">
                       <h4 className="min-w-0 break-words text-sm font-semibold [overflow-wrap:anywhere]">{member.accountName}</h4>
-                      <Badge variant={isCurrent ? "success" : "secondary"} className="shrink-0 text-[10px]">{variantLabel(member.variant)}{isCurrent ? "当前账号" : ""}</Badge>
+                      <div className="flex shrink-0 items-center gap-0.5">
+                        <MemberVariantMark client={props.client} variant={member.variant} isCurrent={isCurrent} />
+                        <DropdownMenu>
+                          <DropdownMenuTrigger asChild>
+                            <Button variant="ghost" size="icon" className="size-6 text-muted-foreground hover:text-foreground" aria-label={`${member.accountName} 的操作`} title="更多操作"><Ellipsis className="size-3.5" /></Button>
+                          </DropdownMenuTrigger>
+                          <DropdownMenuContent align="end" className="w-36">
+                            <DropdownMenuItem onSelect={() => setUnlinkTargetId(member.memberId)}><Unlink />取消关联</DropdownMenuItem>
+                          </DropdownMenuContent>
+                        </DropdownMenu>
+                      </div>
                     </div>
                     <div className="mt-1 flex flex-wrap items-center justify-between gap-1.5"><span className="text-xs tabular-nums text-muted-foreground">{member.recordCount == null ? "内容条数无法确认" : `${member.recordCount} 条内容`}</span>{divergence && commonMemberIds.has(member.memberId) ? <Badge variant="warning" className="text-[10px]">共同旧版</Badge> : branchIndex != null ? <Badge variant="outline" data-branch-badge className="text-[10px]">分支 {branchIndex + 1}</Badge> : (!conflict || !member.canBeSource) && <MemberStatus status={status} equal={equal} />}</div>
                     <Collapsible className="mt-0.5">
@@ -297,6 +327,20 @@ export function GroupDetailPanel(props: GroupDetailPanelProps) {
         </AlertDialogFooter>
       </AlertDialogContent>
     </AlertDialog>
+    <AlertDialog open={!!unlinkTarget} onOpenChange={(open) => { if (!open && !unlinkBusy) setUnlinkTargetId(null); }}>
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>取消「{unlinkTarget?.accountName}」的关联？</AlertDialogTitle>
+          <AlertDialogDescription>
+            该账号不再属于这个会话组，不再参与同步；账号里的会话内容不会被删除。
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          <AlertDialogCancel disabled={unlinkBusy}>取消</AlertDialogCancel>
+          <DemoAction><Button variant="destructive" disabled={unlinkBusy || props.busy} onClick={() => void completeUnlink()}>{unlinkBusy ? "处理中…" : "确认取消关联"}</Button></DemoAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
   </section>;
 }
 
@@ -307,6 +351,18 @@ function MemberStatus({ status, equal }: { status: SessionGroupMemberDetail["ver
   };
   const variant = status === "latest" ? "success" : ["behind", "diverge", "missing"].includes(status) ? "warning" : "outline";
   return <Badge variant={variant} className="text-[10px] font-medium">{labels[status]}</Badge>;
+}
+
+/** 档位标记：与账号页 / 设置页同一套官方图标，国际版带 INTL 角标；当前账号用绿色描边区分。 */
+function MemberVariantMark({ client, variant, isCurrent }: { client: SessionGroupClient; variant: SessionGroupMemberDetail["variant"]; isCurrent: boolean }) {
+  const intl = variantIsIntl(variant);
+  const mark = client === "workbuddy"
+    ? (intl ? <WorkBuddyAiMark size={18} /> : <WorkBuddyMark size={18} />)
+    : client === "codebuddyIde"
+      ? (intl ? <CodeBuddyAiIdeMark size={18} /> : <CodeBuddyCnIdeMark size={18} />)
+      : (intl ? <VscodeExtAiMark size={18} /> : <VscodeExtMark size={18} />);
+  const label = `${clientNames[client]} · ${variantLabel(variant)}${isCurrent ? " · 当前账号" : ""}`;
+  return <span className={`inline-flex shrink-0 rounded-[26%] ${isCurrent ? "ring-2 ring-brand ring-offset-1 ring-offset-card" : ""}`} title={label} aria-label={label} role="img">{mark}</span>;
 }
 
 function formatDate(timestamp: number): string {

@@ -2,6 +2,7 @@ import * as React from "react";
 import * as PopoverPrimitive from "@radix-ui/react-popover";
 
 import { cn } from "@/lib/utils";
+import "./popover.css";
 
 function Popover({ ...props }: React.ComponentProps<typeof PopoverPrimitive.Root>) {
   return <PopoverPrimitive.Root data-slot="popover" {...props} />;
@@ -44,7 +45,9 @@ function PopoverContent({
 function PopoverArrow({ className, ...props }: React.ComponentProps<typeof PopoverPrimitive.Arrow>) {
   // Rotated square in the popover color: radix reserves the arrow's measured height as extra
   // content offset, so the visible tip stays outside the panel and keeps the sideOffset gap.
-  const arrowClassName = "bg-popover fill-popover z-50 size-2.5 translate-y-[calc(-50%_-_2px)] rotate-45 rounded-[2px]";
+  // `border-black/5` matches the panel ring; the exposed two edges get their width from
+  // `popover.css` (keyed on the Content `data-side`), so the outline stays continuous.
+  const arrowClassName = "bg-popover fill-popover border-black/5 z-50 size-2.5 translate-y-[calc(-50%_-_2px)] rotate-45 rounded-[2px]";
   return <PopoverPrimitive.Arrow data-slot="popover-arrow" className={cn(arrowClassName, className)} {...props} />;
 }
 

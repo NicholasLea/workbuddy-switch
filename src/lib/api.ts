@@ -156,6 +156,7 @@ const ROUTES: Record<string, Route> = {
   sync_session_group_unify: { method: "POST", path: "/api/session-groups/unify" },
   sync_session_group_safe_batch: { method: "POST", path: "/api/session-groups/sync-safe" },
   add_session_group_member: { method: "POST", path: "/api/session-groups/add" },
+  unlink_session_group_member: { method: "POST", path: "/api/session-groups/unlink" },
   get_checkin_status: { method: "GET", path: "/api/checkin/status" },
   get_credit_expiry: { method: "POST", path: "/api/credits" },
   get_credit_statistics: { method: "GET", path: "/api/credits/stats" },
@@ -653,6 +654,21 @@ export function addSessionGroupMember(args: {
 }): Promise<{ status: "linked" | "alreadyLinked" | "copiedUnlinked" | "failed"; [key: string]: unknown }> {
   if (demoModeEnabled) return Promise.reject(new Error(DEMO_UNAVAILABLE_MESSAGE));
   return call("add_session_group_member", args as unknown as Record<string, unknown>);
+}
+
+/**
+ * 取消关联：把成员从会话组移除（只解除管理关系，不删除账号内的会话内容）。
+ *
+ * `groupRemoved` 表示移除后组内已无成员，该组已被删除。
+ */
+export function unlinkSessionGroupMember(args: {
+  client: SessionGroupClient;
+  groupId: string;
+  memberId: string;
+  variantScope?: WbVariant;
+}): Promise<{ status: "removed" | "groupRemoved"; client: SessionGroupClient; groupId: string; memberId: string; remaining: number }> {
+  if (demoModeEnabled) return Promise.reject(new Error(DEMO_UNAVAILABLE_MESSAGE));
+  return call("unlink_session_group_member", args as unknown as Record<string, unknown>);
 }
 
 /** 打开系统设置授权面板（桌面端专用；webui 模式由服务进程权限决定，无操作）。 */
