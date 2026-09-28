@@ -2030,7 +2030,9 @@ fn preview_group_item(
         .iter()
         .map(|mode| mode.as_str())
         .collect();
-    let actionable = !modes.is_empty();
+    // Keep ordinary sync unavailable for Ahead, but bind its verified snapshot so the
+    // session-group "use this copy" flow can explicitly request UnifyOverwrite.
+    let actionable = !modes.is_empty() || decision.verdict == SyncVerdict::Ahead;
 
     let mut item = json!({
         "groupId": group.id,
@@ -5515,7 +5517,11 @@ mod tests {
         );
         assert_eq!(after.groups[0].members.len(), members_before);
         assert_eq!(env.baseline_files(), baselines_before, "不得新增基线文件");
-        assert_eq!(env.mapping_rows(), 0, "复制不再预写云端映射，恢复也不得补写");
+        assert_eq!(
+            env.mapping_rows(),
+            0,
+            "复制不再预写云端映射，恢复也不得补写"
+        );
         assert_eq!(env.body_files().len(), 2, "不得产生第二个副本");
         assert_eq!(env.rows_for("uid-b"), vec![new_id]);
         assert!(session_link::pending_operations(&paths, WbVariant::Cn).is_empty());
@@ -6699,7 +6705,7 @@ mod tests {
         assert_eq!(env.baseline_files(), baselines_before);
     }
 
-    /// 仅目标变化 → ahead：不可勾选、不发凭据，目标正文不变。
+    /// 仅目标变化 → ahead：普通同步不可勾选，但为显式整组统一保留校验凭据。
     #[test]
     fn preview_reports_ahead_when_only_target_changed() {
         let env = ready_env("sync-preview-ahead");
@@ -6716,7 +6722,10 @@ mod tests {
         assert_eq!(group["extraA"], 0);
         assert_eq!(group["extraB"], 5);
         assert_eq!(group["availableModes"], json!([]));
-        assert!(group.get("previewToken").is_none(), "不可勾选的组不发凭据");
+        assert!(
+            group["previewToken"].as_str().is_some(),
+            "显式整组统一需要绑定当前内容"
+        );
         assert!(group["reason"]
             .as_str()
             .unwrap()
@@ -6728,6 +6737,40 @@ mod tests {
             target_body_before
         );
         assert_eq!(env.store().revision, revision_before);
+    }
+
+    #[test]
+    fn explicit_group_unify_can_replace_ahead_but_ordinary_overwrite_cannot() {
+        let env = ready_env("sync-unify-ahead");
+        let report = copy(&env, "uid-b", &["sess-1"]);
+        let target_id = env.first_copy_id(&report);
+        append_records(&env.body_path(&target_id), &target_id, 0, 5);
+        let group = preview(&env, "uid-b")["groups"][0].clone();
+        assert_eq!(group["verdict"], "ahead");
+        assert_eq!(group["availableModes"], json!([]));
+        let group_id = group["groupId"].as_str().unwrap();
+        let token = group["previewToken"].as_str().unwrap();
+
+        let rejected = sync(
+            &env,
+            "uid-b",
+            &[selection(group_id, token, SyncMode::Overwrite)],
+        );
+        assert!(rejected["synced"].as_array().unwrap().is_empty());
+        assert_eq!(rejected["errors"].as_array().unwrap().len(), 1);
+
+        let applied = sync(
+            &env,
+            "uid-b",
+            &[selection(group_id, token, SyncMode::UnifyOverwrite)],
+        );
+        assert_eq!(applied["synced"].as_array().unwrap().len(), 1, "{applied}");
+        let source_text = std::fs::read_to_string(env.body_path("sess-1")).unwrap();
+        let target_text = std::fs::read_to_string(env.body_path(&target_id)).unwrap();
+        assert_eq!(
+            session_link::normalize_jsonl(&source_text, "sess-1").unwrap(),
+            session_link::normalize_jsonl(&target_text, &target_id).unwrap(),
+        );
     }
 
     /// 一方有效成员缺失（失效/被替换）→ 不提供写入动作，记录数按契约给 0 而不是 null。

@@ -6,7 +6,7 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use crate::modules::session::{SessionPaths, SyncSelection};
@@ -17,8 +17,8 @@ use crate::modules::vscode_session::{
     CopyItem, SessionStoreSpec, CODEBUDDY_IDE_STORE, VSCODE_STORE,
 };
 use crate::modules::{
-    account, codebuddy_ide_session, codebuddy_ide_session_sync, config, session, session_link,
-    variant::WbVariant, vscode_ext, vscode_session, vscode_session_sync,
+    account, codebuddy_ide_session, codebuddy_ide_session_sync, config, process, session,
+    session_link, variant::WbVariant, vscode_ext, vscode_session, vscode_session_sync,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -193,6 +193,168 @@ pub fn sync_pair(
     }
     let selection = parse_selection(group_id, preview_token, mode)?;
     run_pair_sync(client, scope, &context, &[selection])
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GroupUnifyTarget {
+    pub target_member_id: String,
+    pub preview_token: String,
+    pub mode: String,
+}
+
+/// Apply an explicit WorkBuddy group choice in one lifecycle window. Only a running
+/// variant whose current login is a write target is closed, and only variants that
+/// were closed here are reopened. Pair kernels still validate every preview token.
+pub fn sync_unify_batch(
+    client: SessionClient,
+    scope: Option<WbVariant>,
+    group_id: &str,
+    source_member_id: &str,
+    targets: &[GroupUnifyTarget],
+) -> Result<Value, String> {
+    if client != SessionClient::Workbuddy || scope.is_some() {
+        return Err("仅 WorkBuddy 会话支持自动重启后整组统一".to_string());
+    }
+    if targets.is_empty() {
+        return Err("没有需要同步的目标副本".to_string());
+    }
+    let mut seen = HashSet::new();
+    let mut prepared = Vec::with_capacity(targets.len());
+    for target in targets {
+        if !seen.insert(target.target_member_id.as_str()) {
+            return Err("目标副本重复，请重新检查会话".to_string());
+        }
+        let pair = resolve_pair(
+            client,
+            scope,
+            group_id,
+            source_member_id,
+            &target.target_member_id,
+        )?;
+        let selection = parse_selection(group_id, &target.preview_token, &target.mode)?;
+        prepared.push((pair, selection));
+    }
+
+    let restart_variants = WbVariant::ALL
+        .into_iter()
+        .filter(|variant| {
+            prepared.iter().any(|(pair, _)| {
+                account::variant_of(&pair.target_account) == *variant
+                    && running_target_needs_restart(*variant, &pair.target.uid)
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut closed = Vec::new();
+    for variant in restart_variants {
+        if let Err(error) = process::close_workbuddy(variant, 20) {
+            let reopen_errors = reopen_workbuddy_variants(&closed);
+            let suffix = if reopen_errors.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "；此前关闭的客户端重新打开失败：{}",
+                    reopen_errors.join("；")
+                )
+            };
+            return Err(format!(
+                "关闭 {}失败：{error}{suffix}",
+                workbuddy_variant_label(variant)
+            ));
+        }
+        closed.push(variant);
+    }
+
+    let mut combined = json!({ "client": client.as_str(), "groupId": group_id, "synced": [], "skipped": [], "errors": [], "needsRecovery": false, "temporaryFiles": [], "restartedVariants": [] });
+    for (pair, selection) in prepared {
+        match run_pair_sync(client, scope, &pair, &[selection]) {
+            Ok(report) => {
+                merge_sync_report(&mut combined, report);
+                if combined["needsRecovery"] == true {
+                    break;
+                }
+            }
+            Err(error) => {
+                combined["errors"].as_array_mut().unwrap().push(json!({
+                    "error": format!("{}：{error}", pair.target.uid),
+                }));
+                break;
+            }
+        }
+    }
+
+    if combined["needsRecovery"] == true {
+        combined["errors"].as_array_mut().unwrap().push(json!({
+            "error": "会话写入待恢复，已暂停重新打开客户端；请先处理恢复提示",
+        }));
+        return Ok(combined);
+    }
+    for variant in &closed {
+        match session::recover_pending_session_operations(*variant) {
+            Ok(recovery) if !crate::modules::switch::recovery_blocks_startup(&recovery) => {}
+            Ok(recovery) => {
+                combined["needsRecovery"] = json!(true);
+                combined["errors"].as_array_mut().unwrap().push(json!({
+                    "error": format!("{}仍有待恢复的会话写入（{}），已暂停重新打开客户端", workbuddy_variant_label(*variant), crate::modules::switch::recovery_blocking_detail(&recovery)),
+                }));
+            }
+            Err(error) => {
+                combined["needsRecovery"] = json!(true);
+                combined["errors"].as_array_mut().unwrap().push(json!({
+                    "error": format!("{}无法检查会话恢复状态（{error}），已暂停重新打开客户端", workbuddy_variant_label(*variant)),
+                }));
+            }
+        }
+    }
+    if combined["needsRecovery"] == true {
+        return Ok(combined);
+    }
+    let mut reopened = Vec::new();
+    for variant in closed {
+        if let Err(error) = process::launch_workbuddy(variant, None) {
+            combined["errors"].as_array_mut().unwrap().push(json!({
+                "error": format!("{}会话已处理，但客户端重新打开失败：{error}", workbuddy_variant_label(variant)),
+            }));
+        } else {
+            reopened.push(variant.as_str());
+        }
+    }
+    combined["restartedVariants"] = json!(reopened);
+    Ok(combined)
+}
+
+fn running_target_needs_restart(variant: WbVariant, target_uid: &str) -> bool {
+    should_restart_running_target(
+        process::is_workbuddy_running(variant),
+        session::current_user_uid(variant).as_deref(),
+        target_uid,
+    )
+}
+
+fn should_restart_running_target(
+    running: bool,
+    current_uid: Option<&str>,
+    target_uid: &str,
+) -> bool {
+    running && current_uid.map_or(true, |uid| uid == target_uid)
+}
+
+fn workbuddy_variant_label(variant: WbVariant) -> &'static str {
+    match variant {
+        WbVariant::Cn => "WorkBuddy 国内版",
+        WbVariant::Ai => "WorkBuddy 国际版",
+    }
+}
+
+fn reopen_workbuddy_variants(variants: &[WbVariant]) -> Vec<String> {
+    variants
+        .iter()
+        .filter_map(|variant| {
+            process::launch_workbuddy(*variant, None)
+                .err()
+                .map(|error| format!("{}：{error}", workbuddy_variant_label(*variant)))
+        })
+        .collect()
 }
 
 /// Recompute the group source on the server and sync only targets proven fast-forward safe.
@@ -552,6 +714,15 @@ fn preview_resolved_pair(
         })
         .cloned()
         .ok_or_else(|| "该组当前没有可预览的来源与目标副本".to_string())?;
+    let mut modes = preview.get("availableModes").cloned().unwrap_or(json!([]));
+    if preview.get("verdict").and_then(Value::as_str) == Some("ahead")
+        && preview
+            .get("previewToken")
+            .and_then(Value::as_str)
+            .is_some()
+    {
+        modes = json!(["unifyOverwrite"]);
+    }
     Ok(json!({
         "client": client.as_str(),
         "variantScope": scope.map(WbVariant::as_str),
@@ -559,7 +730,7 @@ fn preview_resolved_pair(
         "sourceMemberId": pair.source.member_id,
         "targetMemberId": pair.target.member_id,
         "verdict": preview.get("verdict").cloned().unwrap_or(Value::Null),
-        "availableModes": preview.get("availableModes").cloned().unwrap_or(json!([])),
+        "availableModes": modes,
         "previewToken": preview.get("previewToken").cloned().unwrap_or(Value::Null),
         "reason": preview.get("reason").cloned().unwrap_or(json!("无法确认")),
         "recordCount": preview.get("recordCount").cloned().unwrap_or(Value::Null),
@@ -633,7 +804,7 @@ fn parse_selection(
     preview_token: &str,
     mode: &str,
 ) -> Result<SyncSelection, String> {
-    if !matches!(mode, "fastForward" | "overwrite") {
+    if !matches!(mode, "fastForward" | "overwrite" | "unifyOverwrite") {
         return Err("不支持的会话同步模式".to_string());
     }
     session::parse_sync_selections(Some(&json!([{
@@ -781,7 +952,13 @@ fn group_payload(
             );
         }
     }
-    let (safe_source, summary_status) = aggregate_group_state(&mut views, &active, &matrix);
+    let (safe_source, aggregate_status) = aggregate_group_state(&mut views, &active, &matrix);
+    let divergence = common_base_branches(&views, &active);
+    let summary_status = if divergence.is_some() {
+        "diverge"
+    } else {
+        aggregate_status
+    };
     let title = views
         .iter()
         .find(|view| !view.title.trim().is_empty())
@@ -821,6 +998,12 @@ fn group_payload(
         "hasSafeSource": safe_source.is_some(),
     });
     if include_detail {
+        if let Some(divergence) = divergence {
+            result["divergence"] = json!({
+                "commonMemberIds": divergence.common.iter().map(|&index| &views[index].member.member_id).collect::<Vec<_>>(),
+                "branches": divergence.branches.iter().map(|branch| branch.iter().map(|&index| &views[index].member.member_id).collect::<Vec<_>>()).collect::<Vec<_>>(),
+            });
+        }
         let member_payloads = views.iter().map(|view| json!({
             "memberId": view.member.member_id,
             "accountId": view.member.account_id,
@@ -834,6 +1017,7 @@ fn group_payload(
             "projectLabel": view.project_label,
             "updatedAt": view.updated_at,
             "recordCount": content_count(&view.content),
+            "contentPreview": content_preview(&view.content),
             "contentState": content_state_name(&view.content),
             "reason": view.reason,
             "canBeSource": view.member.state == MemberState::Active && matches!(view.content, ContentState::Ready(_)),
@@ -843,6 +1027,65 @@ fn group_payload(
         result["addTargets"] = json!(target_options);
     }
     result
+}
+
+/// Recognize one present shared snapshot followed by independent append-only branches.
+/// This uses normalized ordered content, so timestamps and record counts cannot invent ancestry.
+/// A more complex history stays in the generic divergence state.
+#[derive(Debug, PartialEq, Eq)]
+struct CommonBaseBranches {
+    common: Vec<usize>,
+    branches: Vec<Vec<usize>>,
+}
+
+fn common_base_branches(views: &[MemberView], active: &[usize]) -> Option<CommonBaseBranches> {
+    if active.len() < 3 || active.len() != views.len() {
+        return None;
+    }
+    let lines = |index: usize| match &views[index].content {
+        ContentState::Ready(snapshot) => Some(snapshot.normalized.line_digests.as_slice()),
+        _ => None,
+    };
+    let mut versions: Vec<Vec<usize>> = Vec::new();
+    for &index in active {
+        let content = lines(index)?;
+        if let Some(version) = versions
+            .iter_mut()
+            .find(|version| lines(version[0]) == Some(content))
+        {
+            version.push(index);
+        } else {
+            versions.push(vec![index]);
+        }
+    }
+    if versions.len() < 3 {
+        return None;
+    }
+    let common_index = versions.iter().position(|version| {
+        let common = lines(version[0]).expect("active members have readable content");
+        versions
+            .iter()
+            .filter(|other| *other != version)
+            .all(|other| {
+                let branch = lines(other[0]).expect("active members have readable content");
+                branch.len() > common.len() && branch.starts_with(common)
+            })
+    })?;
+    let common = versions.remove(common_index);
+    // Each remaining version must be independently advanced from the shared snapshot.
+    if versions.iter().enumerate().any(|(index, branch)| {
+        versions.iter().skip(index + 1).any(|other| {
+            let left = lines(branch[0]).expect("active members have readable content");
+            let right = lines(other[0]).expect("active members have readable content");
+            left.starts_with(right) || right.starts_with(left)
+        })
+    }) {
+        return None;
+    }
+    Some(CommonBaseBranches {
+        common,
+        branches: versions,
+    })
 }
 
 /// Reduce pairwise decisions into stable member states and a group summary.
@@ -1121,6 +1364,52 @@ fn content_count(content: &ContentState) -> Option<usize> {
     }
 }
 
+fn content_preview(content: &ContentState) -> Vec<Value> {
+    let ContentState::Ready(snapshot) = content else {
+        return Vec::new();
+    };
+    let mut recent = snapshot
+        .text
+        .lines()
+        .rev()
+        .filter_map(|line| {
+            let record: Value = serde_json::from_str(line).ok()?;
+            let text = record_text(&record)?;
+            let text = text.trim();
+            if text.is_empty() {
+                return None;
+            }
+            let speaker = match record
+                .get("role")
+                .or_else(|| record.get("type"))
+                .and_then(Value::as_str)
+            {
+                Some("user") => "用户",
+                Some("assistant") => "助手",
+                _ => "记录",
+            };
+            Some(json!({ "speaker": speaker, "text": text.chars().take(240).collect::<String>() }))
+        })
+        .take(6)
+        .collect::<Vec<_>>();
+    recent.reverse();
+    recent
+}
+
+fn record_text(record: &Value) -> Option<String> {
+    match record {
+        Value::String(text) => Some(text.clone()),
+        Value::Array(items) => {
+            let parts = items.iter().filter_map(record_text).collect::<Vec<_>>();
+            (!parts.is_empty()).then(|| parts.join(" "))
+        }
+        Value::Object(fields) => ["text", "content", "message", "parts"]
+            .iter()
+            .find_map(|key| fields.get(*key).and_then(record_text)),
+        _ => None,
+    }
+}
+
 fn content_state_name(content: &ContentState) -> &'static str {
     match content {
         ContentState::Ready(_) => "ready",
@@ -1150,7 +1439,36 @@ fn basename(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::modules::session_link::{full_digest_of, normalize_jsonl, ContentSnapshot};
+    use crate::modules::session_link::{
+        full_digest_of, normalize_jsonl, ContentSnapshot, SyncMode,
+    };
+
+    #[test]
+    fn restart_only_when_running_client_may_be_using_write_target() {
+        assert!(should_restart_running_target(
+            true,
+            Some("target"),
+            "target"
+        ));
+        assert!(!should_restart_running_target(
+            true,
+            Some("other"),
+            "target"
+        ));
+        assert!(should_restart_running_target(true, None, "target"));
+        assert!(!should_restart_running_target(
+            false,
+            Some("target"),
+            "target"
+        ));
+    }
+
+    #[test]
+    fn explicit_group_unify_mode_reaches_sync_kernel() {
+        let selection = parse_selection("group", "token", "unifyOverwrite").unwrap();
+        assert_eq!(selection.mode, SyncMode::UnifyOverwrite);
+        assert!(parse_selection("group", "token", "unsupported").is_err());
+    }
 
     fn member_view(
         member_id: &str,
@@ -1185,6 +1503,19 @@ mod tests {
         ContentState::Ready(ContentSnapshot {
             full_digest: full_digest_of(text.as_bytes()),
             normalized: normalize_jsonl(&text, &format!("session-{member_id}")).unwrap(),
+            text,
+        })
+    }
+
+    fn ready_lines(ids: &[&str]) -> ContentState {
+        let text = ids
+            .iter()
+            .map(|id| format!(r#"{{"id":"{id}"}}"#))
+            .collect::<Vec<_>>()
+            .join("\n");
+        ContentState::Ready(ContentSnapshot {
+            full_digest: full_digest_of(text.as_bytes()),
+            normalized: normalize_jsonl(&text, "unrelated-session-id").unwrap(),
             text,
         })
     }
@@ -1342,6 +1673,54 @@ mod tests {
         assert_eq!(summary, "diverge");
         assert_eq!(views[0].version_status, "diverge");
         assert_eq!(views[1].version_status, "diverge");
+    }
+
+    #[test]
+    fn recognizes_three_equal_old_copies_and_two_independent_extensions() {
+        let views = vec![
+            member_view("old-a", "a", MemberState::Active, ready_lines(&["base"])),
+            member_view(
+                "tip-a",
+                "b",
+                MemberState::Active,
+                ready_lines(&["base", "alice"]),
+            ),
+            member_view("old-b", "c", MemberState::Active, ready_lines(&["base"])),
+            member_view(
+                "tip-b",
+                "d",
+                MemberState::Active,
+                ready_lines(&["base", "bob"]),
+            ),
+            member_view("old-c", "e", MemberState::Active, ready_lines(&["base"])),
+        ];
+        assert_eq!(
+            common_base_branches(&views, &active_indexes(&views)),
+            Some(CommonBaseBranches {
+                common: vec![0, 2, 4],
+                branches: vec![vec![1], vec![3]]
+            })
+        );
+    }
+
+    #[test]
+    fn does_not_call_a_linear_history_independent_branches() {
+        let views = vec![
+            member_view("old", "a", MemberState::Active, ready_lines(&["base"])),
+            member_view(
+                "mid",
+                "b",
+                MemberState::Active,
+                ready_lines(&["base", "alice"]),
+            ),
+            member_view(
+                "new",
+                "c",
+                MemberState::Active,
+                ready_lines(&["base", "alice", "bob"]),
+            ),
+        ];
+        assert_eq!(common_base_branches(&views, &active_indexes(&views)), None);
     }
 
     #[test]

@@ -229,6 +229,7 @@ pub fn run() {
             commands::get_session_group,
             commands::preview_session_group_pair,
             commands::sync_session_group_pair,
+            commands::sync_session_group_unify,
             commands::sync_session_group_safe_batch,
             commands::add_session_group_member,
             commands::open_permission_settings,

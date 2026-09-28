@@ -717,7 +717,9 @@ fn preview_group_item(context: &SyncContext<'_>, group: &LinkGroup) -> Value {
         .iter()
         .map(|mode| mode.as_str())
         .collect();
-    let actionable = !modes.is_empty();
+    // Ahead stays unavailable in ordinary sync; group unification needs a verified
+    // token for its separate explicit overwrite mode.
+    let actionable = !modes.is_empty() || decision.verdict == SyncVerdict::Ahead;
 
     let mut item = json!({
         "groupId": group.id,
@@ -1059,7 +1061,7 @@ fn plan_sync_item(
 fn execute_sync_item(paths: &SessionPaths, plan: &SyncItemPlan) -> Result<Value, String> {
     match plan.mode {
         SyncMode::FastForward => fast_forward(paths, plan),
-        SyncMode::Overwrite => overwrite(paths, plan),
+        SyncMode::Overwrite | SyncMode::UnifyOverwrite => overwrite(paths, plan),
     }
 }
 

@@ -167,7 +167,7 @@ export interface SessionRecoveryReport {
 export type SessionSyncVerdict = "identical" | "fastForward" | "ahead" | "diverge" | "unknown";
 
 /** 同步写入模式：只有后端 `availableModes` 里给出的模式才允许提交。 */
-export type SessionSyncMode = "fastForward" | "overwrite";
+export type SessionSyncMode = "fastForward" | "overwrite" | "unifyOverwrite";
 
 /** 关联组成员（不含正文）：`state` 为 active 时才算该账号的有效成员。 */
 export interface SessionLinkMember {
@@ -299,6 +299,7 @@ export interface SessionGroupMemberDetail {
   projectLabel: string;
   updatedAt: number;
   recordCount: number | null;
+  contentPreview?: { speaker: string; text: string }[];
   contentState: "ready" | "missing" | "unavailable";
   reason: string;
   canBeSource: boolean;
@@ -315,6 +316,10 @@ export interface SessionGroupList {
 export interface SessionGroupDetail extends SessionGroupSummary {
   members: SessionGroupMemberDetail[];
   addTargets: AccountMeta[];
+  divergence?: {
+    commonMemberIds: string[];
+    branches: string[][];
+  };
 }
 
 export interface SessionGroupPairPreview {
@@ -331,6 +336,28 @@ export interface SessionGroupPairPreview {
   extraTargetCount: number;
 }
 
+/** One read-only plan for making every active copy match a chosen group member. */
+export interface SessionGroupUnifyPlan {
+  client: SessionGroupClient;
+  groupId: string;
+  sourceMemberId: string;
+  sourceName: string;
+  targets: {
+    memberId: string;
+    accountName: string;
+    preview: SessionGroupPairPreview | null;
+    error: string | null;
+  }[];
+}
+
+/** A client-reported current login, matched by stable UID or saved account ID. */
+export interface SessionGroupCurrentAccount {
+  variant?: WbVariant;
+  uid?: string | null;
+  accountId?: string | null;
+  running?: boolean;
+}
+
 export interface SessionGroupActionReport {
   client: SessionGroupClient;
   groupId: string;
@@ -341,6 +368,7 @@ export interface SessionGroupActionReport {
   errors: { groupId?: string; error: string }[];
   needsRecovery?: boolean;
   temporaryFiles?: TemporaryFileInfo[];
+  restartedVariants?: WbVariant[];
 }
 
 /**

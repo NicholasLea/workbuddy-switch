@@ -1,34 +1,36 @@
 import { useEffect, useRef, useState } from "react";
-import { ArrowDownUp, ArrowRight, Check, ChevronDown, ChevronLeft, Copy, FileText, Folder, Info, Link2, Loader2, Plus, RefreshCw, X } from "lucide-react";
+import { ArrowRight, Check, ChevronDown, ChevronLeft, Copy, FileText, Folder, Info, Link2, Loader2, Plus, RefreshCw, TriangleAlert, X } from "lucide-react";
 import { DemoAction } from "@/components/demo-action";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { AlertDialog, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
-import { Popover, PopoverAnchor, PopoverArrow, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { Popover, PopoverArrow, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { accountVariant, variantLabel } from "@/lib/variant";
-import type { SessionGroupClient, SessionGroupDetail, SessionGroupMemberDetail, SessionGroupPairPreview } from "@/lib/types";
+import type { SessionGroupClient, SessionGroupCurrentAccount, SessionGroupDetail, SessionGroupMemberDetail, SessionGroupUnifyPlan } from "@/lib/types";
 import "./session-group-detail.css";
 
 export interface GroupDetailPanelProps {
   client: SessionGroupClient;
   detail: SessionGroupDetail | null;
+  currentAccounts: SessionGroupCurrentAccount[];
   sourceMemberId: string;
   setSourceMemberId: (id: string) => void;
   addTargetId: string;
   setAddTargetId: (id: string) => void;
-  previews: Record<string, SessionGroupPairPreview>;
-  pendingMember: string | null;
+  unifyPlan: SessionGroupUnifyPlan | null;
+  unifyLoading: string | null;
+  setUnifyPlan: (plan: SessionGroupUnifyPlan | null) => void;
   busy: boolean;
   error: string | null;
   loading: boolean;
   onClose: () => void;
   onRetry: () => void;
-  onPreview: (member: SessionGroupMemberDetail) => void;
-  // Both handlers resolve when the page finished its toast/reload work, so the panel can
-  // close the popover only after the operation (success or failure) is done.
-  onSync: (member: SessionGroupMemberDetail, mode: "fastForward" | "overwrite") => Promise<void>;
+  onPrepareUnify: (member: SessionGroupMemberDetail) => void;
+  onConfirmUnify: () => Promise<void>;
   onBatchSync: () => void;
   onAdd: () => Promise<void>;
   addOpen: boolean;
@@ -40,13 +42,14 @@ const clientNames: Record<SessionGroupClient, string> = {
   workbuddy: "WorkBuddy", codebuddyIde: "CodeBuddy IDE", vscodeExt: "CodeBuddy 插件",
 };
 
+type GraphLine = { path: string; tone: "default" | "common" | `branch-${number}`; points: { x: number; y: number }[] };
+
 export function GroupDetailPanel(props: GroupDetailPanelProps) {
   const { detail } = props;
   const panelRef = useRef<HTMLElement>(null);
   const [wide, setWide] = useState(false);
-  const [operationTarget, setOperationTarget] = useState("");
   const graphRef = useRef<HTMLDivElement>(null);
-  const [connections, setConnections] = useState<{ path: string; x: number; y: number; hx: number; hy: number }[]>([]);
+  const [connections, setConnections] = useState<GraphLine[]>([]);
   useEffect(() => {
     const graph = graphRef.current;
     if (!graph) return;
@@ -56,21 +59,28 @@ export function GroupDetailPanel(props: GroupDetailPanelProps) {
       const hub = graph.querySelector<HTMLElement>("[data-session-hub]")?.getBoundingClientRect();
       if (!hub) return;
       const nodes = [...graph.querySelectorAll<HTMLElement>("[data-session-member]")];
+      const lineage = detail?.summaryStatus === "diverge" && detail.divergence;
+      const hasLineage = !!lineage && nodes.every((node) => node.dataset.graphRole === "common" || node.dataset.graphRole === "branch");
+      const leftCount = hasLineage ? nodes.filter((node) => node.dataset.graphRole === "common").length : Math.ceil(nodes.length / 2);
       const next = nodes.map((node, index) => {
         const box = node.getBoundingClientRect();
-        const left = index < Math.ceil(nodes.length / 2);
+        const left = index < leftCount;
         const x = (left ? box.right : box.left) - base.left;
         const y = box.top + box.height / 2 - base.top;
         const hx = (left ? hub.left : hub.right) - base.left;
-        const rows = Math.ceil(nodes.length / 2);
-        const hy = hub.top - base.top + hub.height * (((index % rows) + 1) / (rows + 1));
+        const sideCount = left ? leftCount : nodes.length - leftCount;
+        const sideIndex = left ? index : index - leftCount;
+        const hy = hub.top - base.top + hub.height * ((sideIndex + 1) / (sideCount + 1));
         const mid = (x + hx) / 2;
         const dx = Math.sign(hx - x);
         const dy = Math.sign(hy - y);
         const radius = Math.min(12, Math.abs(hy - y) / 2, Math.abs(hx - x) / 4);
-        const path = radius < 1 ? `M ${x} ${y} H ${hx}`
-          : `M ${x} ${y} H ${mid - dx * radius} Q ${mid} ${y} ${mid} ${y + dy * radius} V ${hy - dy * radius} Q ${mid} ${hy} ${mid + dx * radius} ${hy} H ${hx}`;
-        return { path, x, y, hx, hy };
+        const path = hasLineage && Math.abs(hy - y) > 1
+          ? `M ${x} ${y} C ${mid} ${y} ${mid} ${hy} ${hx} ${hy}`
+          : radius < 1 ? `M ${x} ${y} H ${hx}`
+            : `M ${x} ${y} H ${mid - dx * radius} Q ${mid} ${y} ${mid} ${y + dy * radius} V ${hy - dy * radius} Q ${mid} ${hy} ${mid + dx * radius} ${hy} H ${hx}`;
+        const tone = hasLineage ? left ? "common" as const : `branch-${Number(node.dataset.branchIndex ?? 0) % 5}` as const : "default" as const;
+        return { path, tone, points: [{ x, y }, { x: hx, y: hy }] };
       });
       setConnections(next);
     }
@@ -95,159 +105,208 @@ export function GroupDetailPanel(props: GroupDetailPanelProps) {
   const batchSource = active.find((member) => member.memberId === detail?.safeSourceMemberId);
   const behind = active.filter((member) => member.versionStatus === "behind");
   const canBatch = !!batchSource && behind.length > 0;
+  const conflict = detail?.summaryStatus === "diverge";
+  const divergence = conflict ? detail?.divergence : undefined;
+  const commonMemberIds = new Set(divergence?.commonMemberIds ?? []);
+  const branchOf = new Map(divergence?.branches.flatMap((branch, index) => branch.map((memberId) => [memberId, index] as const)) ?? []);
+  const displayMembers = divergence
+    ? [...detail!.members].sort((left, right) => {
+      const rank = (member: SessionGroupMemberDetail) => commonMemberIds.has(member.memberId) ? 0 : branchOf.has(member.memberId) ? 1 : 2;
+      return rank(left) - rank(right);
+    })
+    : detail?.members ?? [];
+  const blockedTargets = props.unifyPlan?.targets.flatMap((target) => {
+    const preview = target.preview;
+    const issue = target.error || !preview ? target.error ?? "无法检查内容"
+      : preview.client !== props.unifyPlan?.client || preview.groupId !== props.unifyPlan.groupId
+        || preview.sourceMemberId !== props.unifyPlan.sourceMemberId || preview.targetMemberId !== target.memberId
+        ? "检查结果与当前会话不匹配，请重新选择副本"
+        : preview.verdict !== "identical" && (!preview.previewToken || !preview.availableModes.some((mode) => ["fastForward", "overwrite", "unifyOverwrite"].includes(mode)))
+          ? preview.reason || "无法安全更新此副本"
+          : null;
+    return issue ? [{ ...target, issue }] : [];
+  }) ?? [];
+  const changedTargets = props.unifyPlan?.targets.filter((target) => target.preview?.verdict !== "identical") ?? [];
+  const overwrittenTargets = props.unifyPlan?.targets.filter((target) => target.preview?.availableModes.some((mode) => mode === "overwrite" || mode === "unifyOverwrite")) ?? [];
+  const runningVariants = props.currentAccounts.flatMap((current) => current.running && current.variant ? [current.variant] : []);
+  const restartVariants = runningVariants.filter((variant) => props.unifyPlan?.targets.some((target) => {
+    if (target.preview?.verdict === "identical") return false;
+    const member = detail?.members.find((item) => item.memberId === target.memberId);
+    const current = props.currentAccounts.find((item) => item.variant === variant);
+    return member?.variant === variant && (!current?.uid || current.uid === member.uid || current.uid === member.accountId);
+  }));
   const summary = equal
     ? `${active.length} 个账号内容一致`
-    : canBatch ? `${behind.length} 个账号有待同步内容`
-    : detail?.summaryStatus === "diverge" ? "账号内容存在分歧"
+    : canBatch ? `有 ${behind.length} 个账号待同步`
+    : conflict && divergence ? `${divergence.commonMemberIds.length} 个账号在共同旧版，另有 ${divergence.branches.length} 条独立更新`
+    : conflict ? `${active.length} 个账号的会话内容不一致`
     : detail?.summaryStatus === "missing" ? "部分账号内容缺失" : "部分内容状态尚无法确认";
-
-  function openOperation(member: SessionGroupMemberDetail) {
-    props.setAddOpen(false);
-    setOperationTarget(member.memberId);
-    props.setSourceMemberId(batchSource?.memberId ?? sourceOptions.find((item) => item.memberId !== member.memberId)?.memberId ?? "");
-  }
-  // A stored preview is only valid for the exact source/target/group/client it was requested for.
-  function memberPreview(member: SessionGroupMemberDetail): SessionGroupPairPreview | undefined {
-    const preview = props.previews[member.memberId];
-    return preview && preview.sourceMemberId === props.sourceMemberId
-      && preview.targetMemberId === member.memberId
-      && preview.groupId === detail?.groupId
-      && preview.client === props.client ? preview : undefined;
-  }
   // Close the popover after the page handler settled; it resolves on failure too and keeps the toast.
   async function completeAdd() {
     await props.onAdd();
     props.setAddOpen(false);
   }
-  async function completeSync(member: SessionGroupMemberDetail, mode: "fastForward" | "overwrite") {
-    await props.onSync(member, mode);
-    setOperationTarget("");
-  }
   function openAdd() {
-    setOperationTarget("");
     props.setAddOpen(true);
   }
   function sourceSelect(label: string) {
     return <Select value={selectedSource?.memberId ?? ""} onValueChange={props.setSourceMemberId} disabled={props.busy || sourceOptions.length === 0}>
-      <SelectTrigger className="w-full min-w-0 bg-background" aria-label={label}><SelectValue placeholder="选择可读取的账号副本" /></SelectTrigger>
-      <SelectContent>{sourceOptions.map((member) => <SelectItem key={member.memberId} value={member.memberId}>{member.accountName} · {variantLabel(member.variant)}</SelectItem>)}</SelectContent>
+      <SelectTrigger size="sm" className="w-full min-w-0 bg-background text-xs" aria-label={label}><SelectValue placeholder="选择可读取的账号副本" /></SelectTrigger>
+      <SelectContent>{sourceOptions.map((member) => <SelectItem key={member.memberId} value={member.memberId} className="text-xs">{member.accountName} · {variantLabel(member.variant)}</SelectItem>)}</SelectContent>
     </Select>;
   }
 
   return <section ref={panelRef} aria-label="会话组详情" data-relationship-layout={wide ? "hub-wide" : "hub-compact"} className="session-relationship flex h-full min-h-0 min-w-0 flex-col bg-card">
-    <div className="flex shrink-0 items-center justify-between px-5 py-4">
-      <span className="text-sm font-medium text-muted-foreground">会话详情</span>
-      <Button variant="ghost" size={props.fullPage ? "sm" : "icon"} aria-label={props.fullPage ? "返回会话" : "关闭详情"} onClick={props.onClose}>
-        {props.fullPage ? <><ChevronLeft />返回会话</> : <X />}
+    <div className="flex shrink-0 items-center justify-between px-4 py-2.5">
+      <span className="text-xs font-medium text-muted-foreground">会话详情</span>
+      <Button variant="ghost" size={props.fullPage ? "sm" : "icon"} className={props.fullPage ? "h-7 text-xs" : "size-7"} aria-label={props.fullPage ? "返回会话" : "关闭详情"} onClick={props.onClose}>
+        {props.fullPage ? <><ChevronLeft className="size-3.5" />返回会话</> : <X className="size-4" />}
       </Button>
     </div>
-    <div data-detail-scroll className="min-h-0 flex-1 overflow-y-auto px-5 pb-5">
-      {props.error && <div role="alert" className="mb-4 space-y-2 rounded-lg border border-destructive/30 p-3 text-sm text-destructive">
-        <p className="break-words">{props.error}</p><Button variant="outline" size="sm" disabled={props.loading} onClick={props.onRetry}>重试</Button>
+    <div data-detail-scroll className="min-h-0 flex-1 overflow-y-auto px-4 pb-3">
+      {props.error && <div role="alert" className="mb-3 space-y-1.5 rounded-lg border border-destructive/30 p-2.5 text-xs text-destructive">
+        <p className="break-words">{props.error}</p><Button variant="outline" size="sm" className="h-7 text-xs" disabled={props.loading} onClick={props.onRetry}>重试</Button>
       </div>}
-      {!detail && !props.error && <div aria-label="正在加载会话详情" aria-busy="true" className="space-y-4">
-        <Skeleton className="h-8 w-3/4" /><Skeleton className="h-20 w-full" /><Skeleton className="h-56 w-full" />
+      {!detail && !props.error && <div aria-label="正在加载会话详情" aria-busy="true" className="space-y-3">
+        <Skeleton className="h-6 w-3/4" /><Skeleton className="h-14 w-full" /><Skeleton className="h-44 w-full" />
       </div>}
       {detail && <>
-        <h2 className={`break-words font-semibold leading-snug tracking-tight ${wide ? "text-3xl" : "text-2xl"}`}>{detail.title}</h2>
-        <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-2">
+        <h2 className={`break-words font-semibold leading-snug tracking-tight ${wide ? "text-xl" : "text-lg"}`}>{detail.title}</h2>
+        <div className="mt-2 flex flex-wrap items-center gap-x-2.5 gap-y-1">
           <Badge variant="success">{clientNames[props.client]}</Badge>
-          <span className="flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground"><Folder className="size-3.5 shrink-0" /><span className="truncate" title={detail.projectLabel}>{detail.projectLabel || "未标记项目"}</span></span>
+          <span className="flex min-w-0 items-center gap-1 text-[11px] text-muted-foreground"><Folder className="size-3 shrink-0" /><span className="truncate" title={detail.projectLabel}>{detail.projectLabel || "未标记项目"}</span></span>
         </div>
-        <div className={`my-5 flex items-center gap-3 rounded-lg p-3 ${equal ? "bg-brand/10" : "bg-muted/70"}`} data-relationship-summary>
-          <span className={`flex size-7 shrink-0 items-center justify-center rounded-full ${equal ? "bg-brand text-brand-foreground" : "bg-background text-muted-foreground"}`}>{equal ? <Check className="size-4" /> : <Info className="size-4" />}</span>
-          <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-5 gap-y-1"><p className="text-base font-semibold">{summary}</p>{equal && active[0]?.recordCount != null && <p className="text-sm text-muted-foreground">{active[0].recordCount} 条内容 · 无需同步</p>}</div>
-          <Button variant="ghost" size="icon" className="size-8 shrink-0" aria-label="重新检查会话状态" title="重新检查" disabled={props.loading || props.busy} onClick={props.onRetry}><RefreshCw className={props.loading ? "animate-spin" : undefined} /></Button>
+        <Alert variant={conflict ? "destructive" : canBatch ? "warning" : equal ? "success" : "default"} className={`my-3 min-w-0 py-2.5 pr-11 ${conflict ? "border-destructive/35 bg-destructive/10 text-destructive dark:text-red-300" : canBatch ? "dark:text-amber-200" : equal ? "" : "bg-muted/70"}`} data-relationship-summary>
+          {conflict ? <TriangleAlert aria-hidden="true" /> : equal ? <Check aria-hidden="true" /> : <Info aria-hidden="true" />}
+          <AlertTitle className="text-xs leading-4">{summary}</AlertTitle>
+          {conflict && <AlertDescription className="text-[11px] leading-4 text-destructive/85 dark:text-red-200/80">{divergence ? "这些更新都包含共同旧版，但彼此内容不同，无法自动合并。请选择要保留的一份。" : "选择要保留的一份；确认后将它的内容统一到其他可验证的账号。"}</AlertDescription>}
+          {equal && active[0]?.recordCount != null && <AlertDescription className="text-[11px] leading-4">{active[0].recordCount} 条内容 · 无需同步</AlertDescription>}
+          <Button variant="ghost" size="icon" className={`absolute right-2 top-2 size-7 ${conflict ? "hover:bg-destructive/10" : canBatch ? "hover:bg-amber-500/10" : "hover:bg-emerald-500/10"}`} aria-label="重新检查会话状态" title="重新检查" disabled={props.loading || props.busy} onClick={props.onRetry}><RefreshCw className={`size-3.5 ${props.loading ? "animate-spin" : ""}`} /></Button>
+        </Alert>
+        <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+          <div><h3 className="text-sm font-semibold">{divergence ? "内容分支图" : "会话关联图"}</h3><p className="mt-0.5 text-[11px] leading-4 text-muted-foreground">{divergence ? `共同旧版上的 ${divergence.branches.length} 条独立更新` : "同一会话，在不同账号中各有一份"}</p></div>
+          <span className="rounded-full bg-muted px-2 py-0.5 text-[11px] tabular-nums text-muted-foreground">{detail.members.length} 个账号</span>
         </div>
-        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-          <div><h3 className="text-base font-semibold">会话关联图</h3><p className="mt-1 text-xs leading-5 text-muted-foreground">同一会话，在不同账号中各有一份</p></div>
-          <span className="rounded-full bg-muted px-2 py-1 text-xs tabular-nums text-muted-foreground">{detail.members.length} 个账号</span>
-        </div>
-        <div className="relationship-canvas rounded-xl border border-brand/10 bg-brand/5 p-4">
-          <div ref={graphRef} className="relationship-graph">
-          <svg className="relationship-connections" aria-hidden="true">{connections.map((line, index) => <g key={index}><path d={line.path} /><circle cx={line.x} cy={line.y} r="3.5" /><circle cx={line.hx} cy={line.hy} r="3.5" /></g>)}</svg>
+        <div className="relationship-canvas rounded-xl border border-brand/10 bg-brand/5 p-3">
+          {divergence && <div className="relationship-group-labels mb-2 flex items-center justify-between gap-3 text-[11px] leading-4">
+            <span className="rounded-md bg-amber-500/10 px-2 py-1 font-medium text-amber-800 dark:text-amber-200">共同旧版 · {divergence.commonMemberIds.length} 个账号</span>
+            <ArrowRight className="size-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />
+            <span className="rounded-md bg-destructive/10 px-2 py-1 font-medium text-destructive">独立更新 · {divergence.branches.length} 条分支</span>
+          </div>}
+          <div ref={graphRef} className="relationship-graph" data-lineage={!!divergence}>
+          <svg className="relationship-connections" aria-hidden="true">{connections.map((line, index) => <g key={index} data-line-tone={line.tone}><path d={line.path} />{line.points.map((point, pointIndex) => <circle key={pointIndex} cx={point.x} cy={point.y} r="3.5" />)}</g>)}</svg>
           <div className="relationship-root" data-session-hub>
-            <span className="flex size-11 shrink-0 items-center justify-center rounded-xl border border-brand/25 bg-brand/10 text-brand"><FileText className="size-6" /></span>
-            <div><p className="text-base font-semibold">同一会话</p><p className="mt-0.5 text-xs text-muted-foreground">{detail.members.length} 个关联账号</p></div>{equal && <Badge variant="success">内容一致</Badge>}
+            <span className="flex size-9 shrink-0 items-center justify-center rounded-lg border border-brand/25 bg-brand/10 text-brand"><FileText className="size-5" /></span>
+            <div><p className="text-sm font-semibold">{divergence ? "共同旧版" : "同一会话"}</p><p className="mt-0.5 text-[11px] text-muted-foreground">{divergence ? `${divergence.commonMemberIds.length} 个账号内容相同` : `${detail.members.length} 个关联账号`}</p></div>{equal && <Badge variant="success">内容一致</Badge>}
           </div>
           <ul className="relationship-members" aria-label="关联账号副本">
-            {detail.members.map((member, index) => {
+            {displayMembers.map((member, index) => {
               const isActive = member.linkState === "active";
-              const canInspect = isActive && !equal && member.memberId !== batchSource?.memberId;
-              // Any active member can become the operation target after 交换来源与目标, so every
-              // active card hosts a popover; a card without the entry button only needs an
-              // invisible anchor for that swapped state.
-              const canHostOperation = isActive && !equal;
+              const isCurrent = isActive && props.currentAccounts.some((current) =>
+                (!current.variant || current.variant === member.variant)
+                && ((current.uid && (current.uid === member.uid || current.uid === member.accountId))
+                  || (current.accountId && current.accountId === member.accountId)),
+              );
               const status = member.linkState === "active" ? member.versionStatus : member.linkState;
-              const preview = memberPreview(member);
-              const conflictTitle = detail.summaryStatus === "diverge" ? "处理分歧" : "检查副本差异";
-              return <li key={member.memberId} className="relationship-branch" style={{ gridColumn: index < Math.ceil(detail.members.length / 2) ? 1 : 3, gridRow: index % Math.ceil(detail.members.length / 2) + 1 }} data-session-member={member.memberId} data-link-state={member.linkState}>
-                <Popover open={operationTarget === member.memberId} onOpenChange={(open) => { if (!open) setOperationTarget(""); }}>
-                  <article className={`relative min-w-0 rounded-lg border bg-card p-3.5 shadow-xs ${isActive ? "border-border" : "border-dashed border-border text-muted-foreground"}`}>
-                    <div className="flex min-w-0 flex-wrap items-center gap-2">
-                      <h4 className="min-w-0 break-words text-base font-semibold [overflow-wrap:anywhere]">{member.accountName}</h4>
-                      <Badge variant="secondary" className="shrink-0 text-[11px]">{variantLabel(member.variant)}</Badge>
+              const branchIndex = branchOf.get(member.memberId);
+              const graphRole = divergence ? commonMemberIds.has(member.memberId) ? "common" : branchIndex != null ? "branch" : undefined : undefined;
+              const commonCount = divergence?.commonMemberIds.length ?? Math.ceil(displayMembers.length / 2);
+              return <li key={member.memberId} className="relationship-branch" style={{ gridColumn: index < commonCount ? 1 : 3, gridRow: index < commonCount ? index + 1 : index - commonCount + 1 }} data-session-member={member.memberId} data-link-state={member.linkState} data-graph-role={graphRole} data-branch-index={branchIndex}>
+                  <article className={`relative min-w-0 rounded-lg border bg-card p-2.5 shadow-xs ${isActive ? "border-border" : "border-dashed border-border text-muted-foreground"}`}>
+                    <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+                      <h4 className="min-w-0 break-words text-sm font-semibold [overflow-wrap:anywhere]">{member.accountName}</h4>
+                      <Badge variant={isCurrent ? "success" : "secondary"} className="shrink-0 text-[10px]">{variantLabel(member.variant)}{isCurrent ? "当前账号" : ""}</Badge>
                     </div>
-                    <div className="mt-1.5 flex flex-wrap items-center justify-between gap-2"><span className="text-[13px] tabular-nums text-muted-foreground">{member.recordCount == null ? "内容条数无法确认" : `${member.recordCount} 条内容`}</span><MemberStatus status={status} equal={equal} /></div>
-                    <Collapsible className="mt-1">
-                      <div className="flex flex-wrap items-center justify-between gap-x-2"><p className="text-[13px] text-muted-foreground">{formatDate(member.updatedAt)}</p><CollapsibleTrigger asChild><Button variant="ghost" size="sm" className="h-6 gap-1 px-0 text-[13px] text-brand">副本详情<ChevronDown className="size-3" /></Button></CollapsibleTrigger></div>
-                      <CollapsibleContent className="space-y-1 py-2 text-xs leading-5 text-muted-foreground"><p className="break-words">{member.projectLabel || "未标记工作区"}</p><p className="break-words">{member.reason}</p></CollapsibleContent>
+                    <div className="mt-1 flex flex-wrap items-center justify-between gap-1.5"><span className="text-xs tabular-nums text-muted-foreground">{member.recordCount == null ? "内容条数无法确认" : `${member.recordCount} 条内容`}</span>{divergence && commonMemberIds.has(member.memberId) ? <Badge variant="warning" className="text-[10px]">共同旧版</Badge> : branchIndex != null ? <Badge variant="outline" data-branch-badge className="text-[10px]">分支 {branchIndex + 1}</Badge> : (!conflict || !member.canBeSource) && <MemberStatus status={status} equal={equal} />}</div>
+                    <Collapsible className="mt-0.5">
+                      <div className="flex flex-wrap items-center justify-between gap-x-2"><p className="text-[11px] text-muted-foreground">{formatDate(member.updatedAt)}</p><CollapsibleTrigger asChild><Button variant="ghost" size="sm" className="h-5 gap-0.5 px-0 text-[11px] text-brand">{conflict && member.canBeSource ? "查看内容" : "副本详情"}<ChevronDown className="size-3" /></Button></CollapsibleTrigger></div>
+                      <CollapsibleContent className="space-y-1.5 py-1.5 text-[11px] leading-4 text-muted-foreground">
+                        {conflict && member.canBeSource && <div className="max-h-44 space-y-1.5 overflow-y-auto rounded-md bg-muted/60 p-2">
+                          {member.contentPreview?.length ? <><p>最近 {member.contentPreview.length} 条可读内容：</p>{member.contentPreview.map((item, previewIndex) => <p key={previewIndex} className="break-words"><span className="font-medium text-foreground">{item.speaker}：</span>{item.text}</p>)}</> : <p>此副本暂无可展示的内容预览，请在对应客户端查看完整会话。</p>}
+                        </div>}
+                        <p className="break-words">{member.projectLabel || "未标记工作区"}</p><p className="break-words">{member.reason}</p>
+                      </CollapsibleContent>
                     </Collapsible>
-                    {isActive && member.versionStatus === "behind" && batchSource && <p className="mt-2 flex items-start gap-1 text-xs leading-5 text-muted-foreground"><ArrowRight className="mt-0.5 size-3.5 shrink-0" /><span className="break-words">可从「{batchSource.accountName}」同步</span></p>}
-                    {canInspect && <PopoverTrigger asChild><Button variant="outline" size="sm" className="mt-2 h-7 text-xs" disabled={props.busy} onClick={() => openOperation(member)}>{member.versionStatus === "diverge" ? "处理分歧" : "检查差异"}</Button></PopoverTrigger>}
-                    {canHostOperation && !canInspect && <PopoverAnchor asChild><span aria-hidden className="block h-0 w-full" /></PopoverAnchor>}
+                    {isActive && member.versionStatus === "behind" && batchSource && <p className="mt-1.5 flex items-start gap-1 text-[11px] leading-4 text-muted-foreground"><ArrowRight className="mt-0.5 size-3 shrink-0" /><span className="break-words">可从「{batchSource.accountName}」同步</span></p>}
+                    {conflict && member.canBeSource && <Button variant="outline" size="sm" className="mt-1.5 h-7 px-2 text-xs" disabled={props.busy || !!props.unifyLoading} onClick={() => props.onPrepareUnify(member)}>{props.unifyLoading === member.memberId ? <Loader2 className="size-3.5 animate-spin" /> : null}{commonMemberIds.has(member.memberId) ? "以旧版为准" : "以此为准"}</Button>}
                   </article>
-                  {canHostOperation && <PopoverContent data-conflict-flow side="top" collisionPadding={12} aria-label={conflictTitle} className="w-[min(360px,calc(100vw-32px))] space-y-3">
-                    <div className="flex items-center justify-between gap-2"><h3 className="text-sm font-semibold">{conflictTitle}</h3><Button variant="ghost" size="sm" onClick={() => setOperationTarget("")}>取消</Button></div>
-                    <p className="text-xs text-muted-foreground">仅选择本次操作的来源和目标。检查不会修改任何副本。</p>
-                    <div className="grid gap-3 sm:grid-cols-2"><div className="space-y-1"><p className="text-xs">来源账号</p>{sourceSelect("选择比较来源")}</div><div className="space-y-1"><p className="text-xs">目标账号</p><Select value={operationTarget} onValueChange={setOperationTarget} disabled={props.busy}><SelectTrigger className="w-full" aria-label="选择比较目标"><SelectValue /></SelectTrigger><SelectContent>{active.filter((item) => item.memberId !== props.sourceMemberId).map((item) => <SelectItem key={item.memberId} value={item.memberId}>{item.accountName}</SelectItem>)}</SelectContent></Select></div></div>
-                    <div className="flex flex-wrap gap-2"><Button variant="outline" size="sm" disabled={props.busy || !member.canBeSource || !selectedSource || member.memberId === selectedSource.memberId} onClick={() => { const previous = props.sourceMemberId; props.setSourceMemberId(member.memberId); setOperationTarget(previous); }}><ArrowDownUp />交换来源与目标</Button><Button size="sm" disabled={props.busy || !selectedSource || member.memberId === selectedSource.memberId || !!props.pendingMember} onClick={() => props.onPreview(member)}>{props.pendingMember ? <Loader2 className="animate-spin" /> : <RefreshCw />}检查差异</Button></div>
-                    {preview && <div className="space-y-2"><p className="text-sm">{preview.reason}</p>{preview.availableModes.includes("overwrite") && <p className="text-sm text-destructive">目标独有 {preview.extraTargetCount} 条内容将被替换，无法通过本工具撤销。</p>}<div className="flex gap-2">{preview.previewToken && preview.availableModes.includes("fastForward") && <DemoAction><Button disabled={props.busy} onClick={() => void completeSync(member, "fastForward")}>同步到目标</Button></DemoAction>}{preview.previewToken && preview.availableModes.includes("overwrite") && <DemoAction><Button variant="destructive" disabled={props.busy} onClick={() => void completeSync(member, "overwrite")}>覆盖目标</Button></DemoAction>}</div></div>}
-                    <PopoverArrow />
-                  </PopoverContent>}
-                </Popover>
               </li>;
             })}
           </ul>
           </div>
-          {equal && <p className="mt-4 flex items-center justify-center gap-2 text-xs leading-5 text-muted-foreground"><Check className="size-4 shrink-0 text-brand" />有效关联内容一致，无需同步</p>}
+          {equal && <p className="mt-3 flex items-center justify-center gap-1.5 text-[11px] leading-4 text-muted-foreground"><Check className="size-3.5 shrink-0 text-brand" />有效关联内容一致，无需同步</p>}
         </div>
-        <p className="mt-3 flex items-start gap-2 text-xs leading-5 text-muted-foreground"><Info className="mt-0.5 size-3.5 shrink-0" />{equal ? "账号更新后，可重新检查同步方向与内容差异。" : "连线表示账号关联；同步方向以内容检查结果为准。"}</p>
+        <p className="mt-2 flex items-start gap-1.5 text-[11px] leading-4 text-muted-foreground"><Info className="mt-0.5 size-3 shrink-0" />{divergence ? "线条表示已验证的内容继承与分叉；不同颜色的分支互有新增，无法自动合并。" : conflict ? "连线只表示这些账号属于同一会话；不会自动选择要保留的内容。" : equal ? "账号更新后，可重新检查内容状态。" : "连线表示账号关联；仅在确认可安全补齐时提供批量同步。"}</p>
       </>}
     </div>
     {detail && <Popover open={props.addOpen} onOpenChange={(open) => { if (!open) props.setAddOpen(false); }}>
-      <footer data-detail-footer className="relationship-footer shrink-0 space-y-2.5 border-t border-border/70 bg-card px-5 py-4">
+      <footer data-detail-footer className="relationship-footer shrink-0 space-y-1.5 border-t border-border/70 bg-card px-4 py-2.5">
         {canBatch ? <>
-          <DemoAction className="w-full"><Button className="h-11 w-full bg-brand text-brand-foreground hover:bg-brand/90" disabled={props.busy} onClick={props.onBatchSync}><RefreshCw className={props.busy ? "animate-spin" : undefined} />同步 {behind.length} 个落后账号</Button></DemoAction>
-          <div className="flex items-center justify-between gap-2"><p className="min-w-0 truncate text-xs text-muted-foreground" title={`${batchSource.accountName} → ${behind.map((member) => member.accountName).join("、")}`}>{batchSource.accountName} → {behind.length} 个账号</p><PopoverTrigger asChild><Button variant="ghost" size="sm" className="h-7 shrink-0 px-1 text-xs" onClick={openAdd}><Plus />关联新账号</Button></PopoverTrigger></div>
+          <DemoAction className="w-full"><Button size="sm" className="h-8 w-full bg-brand text-xs text-brand-foreground hover:bg-brand/90" disabled={props.busy} onClick={props.onBatchSync}><RefreshCw className={`size-3.5 ${props.busy ? "animate-spin" : ""}`} />同步到 {behind.length} 个落后账号</Button></DemoAction>
+          <div className="flex items-center justify-between gap-2"><p className="min-w-0 truncate text-[11px] text-muted-foreground" title={`${batchSource.accountName} → ${behind.map((member) => member.accountName).join("、")}`}>{batchSource.accountName} → {behind.length} 个账号</p><PopoverTrigger asChild><Button variant="ghost" size="sm" className="h-6 shrink-0 px-1 text-xs" onClick={openAdd}><Plus className="size-3.5" />关联新账号</Button></PopoverTrigger></div>
+        </> : conflict ? <>
+          <p className="text-center text-xs text-muted-foreground">在上方选择一个副本，统一其他账号</p>
+          <PopoverTrigger asChild><Button variant="ghost" size="sm" className="h-7 w-full text-xs" onClick={openAdd}><Plus className="size-3.5" />关联新账号</Button></PopoverTrigger>
         </> : <>
-          <PopoverTrigger asChild><Button className="h-11 w-full bg-brand text-brand-foreground hover:bg-brand/90" onClick={openAdd}><Link2 />关联新账号</Button></PopoverTrigger>
-          <p className="text-center text-xs leading-5 text-muted-foreground">选择一个现有账号，将会话复制到新账号</p>
+          <PopoverTrigger asChild><Button size="sm" className="h-8 w-full bg-brand text-xs text-brand-foreground hover:bg-brand/90" onClick={openAdd}><Link2 className="size-3.5" />关联新账号</Button></PopoverTrigger>
+          <p className="text-center text-[11px] leading-4 text-muted-foreground">选择一个现有账号，将会话复制到新账号</p>
         </>}
       </footer>
-      <PopoverContent side="top" collisionPadding={12} aria-label="关联新账号" className="w-[min(320px,calc(100vw-32px))] space-y-3">
-        <h3 className="text-sm font-semibold">关联新账号</h3>
-        <p className="text-xs leading-5 text-muted-foreground">{equal ? "选择任一可读取的副本，复制到新账号并建立关联。" : "将所选账号的当前副本复制到新账号，并建立关联。"}</p>
-        <div className="space-y-1.5"><p className="text-xs font-medium">复制来源</p>{sourceSelect("选择复制来源")}</div>
-        <div className="space-y-1.5"><p className="text-xs font-medium">目标账号</p><Select value={props.addTargetId} onValueChange={props.setAddTargetId} disabled={props.busy || detail.addTargets.length === 0}>
-          <SelectTrigger className="w-full min-w-0 bg-background" aria-label="目标关联账号"><SelectValue placeholder="选择兼容账号" /></SelectTrigger>
-          <SelectContent>{detail.addTargets.map((account) => <SelectItem key={account.id} value={account.id}>{account.nickname || account.email || account.uid || account.id} · {variantLabel(accountVariant(account))}</SelectItem>)}</SelectContent>
+      <PopoverContent side="top" collisionPadding={12} aria-label="关联新账号" className="w-[min(304px,calc(100vw-32px))] space-y-2.5 p-3">
+        <h3 className="text-xs font-semibold">关联新账号</h3>
+        <p className="text-[11px] leading-4 text-muted-foreground">{equal ? "选择任一可读取的副本，复制到新账号并建立关联。" : "将所选账号的当前副本复制到新账号，并建立关联。"}</p>
+        <div className="space-y-1"><p className="text-[11px] font-medium">复制来源</p>{sourceSelect("选择复制来源")}</div>
+        <div className="space-y-1"><p className="text-[11px] font-medium">目标账号</p><Select value={props.addTargetId} onValueChange={props.setAddTargetId} disabled={props.busy || detail.addTargets.length === 0}>
+          <SelectTrigger size="sm" className="w-full min-w-0 bg-background text-xs" aria-label="目标关联账号"><SelectValue placeholder="选择兼容账号" /></SelectTrigger>
+          <SelectContent>{detail.addTargets.map((account) => <SelectItem key={account.id} value={account.id} className="text-xs">{account.nickname || account.email || account.uid || account.id} · {variantLabel(accountVariant(account))}</SelectItem>)}</SelectContent>
         </Select></div>
-        {detail.addTargets.length === 0 && <p className="text-xs text-muted-foreground">没有可添加的兼容账号。</p>}
-        <DemoAction className="w-full"><Button className="w-full" disabled={props.busy || !selectedSource || !props.addTargetId} onClick={() => void completeAdd()}><Copy />{props.busy ? "处理中…" : "复制并关联"}</Button></DemoAction>
+        {detail.addTargets.length === 0 && <p className="text-[11px] text-muted-foreground">没有可添加的兼容账号。</p>}
+        <DemoAction className="w-full"><Button size="sm" className="h-8 w-full text-xs" disabled={props.busy || !selectedSource || !props.addTargetId} onClick={() => void completeAdd()}><Copy className="size-3.5" />{props.busy ? "处理中…" : "复制并关联"}</Button></DemoAction>
         <PopoverArrow />
       </PopoverContent>
     </Popover>}
+    <AlertDialog open={!!props.unifyPlan} onOpenChange={(open) => { if (!open) props.setUnifyPlan(null); }}>
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>以「{props.unifyPlan?.sourceName}」的内容为准？</AlertDialogTitle>
+          <AlertDialogDescription>
+            将这份会话内容统一到其他 {props.unifyPlan?.targets.length ?? 0} 个账号。内容相同的账号会跳过。
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        {props.unifyPlan && commonMemberIds.has(props.unifyPlan.sourceMemberId) && <Alert variant="destructive" className="py-2.5">
+          <TriangleAlert aria-hidden="true" />
+          <AlertTitle className="text-xs leading-4">你选择的是共同旧版</AlertTitle>
+          <AlertDescription className="text-[11px] leading-4">确认后，两条独立分支中的新增内容都会被旧版替换。</AlertDescription>
+        </Alert>}
+        {props.client === "workbuddy" && changedTargets.length > 0 && <Alert variant="warning" className="py-2.5 dark:text-amber-200">
+          <Info aria-hidden="true" />
+          <AlertTitle className="text-xs leading-4">{runningVariants.length ? `当前运行：${runningVariants.map(variantLabel).join("、")}` : "执行前会检查客户端运行状态"}</AlertTitle>
+          <AlertDescription className="text-[11px] leading-4 text-amber-900/80 dark:text-amber-200/80">
+            {restartVariants.length ? `确认后将先关闭目标账号所在的${restartVariants.map(variantLabel).join("、")}，同步结束再自动打开。` : "若目标账号所在的客户端正在运行，确认后将自动关闭并在同步结束后重新打开。"}请先保存未完成的输入；执行时会再次核对实际运行状态。若写入待恢复，将暂停重新打开并提示处理。
+          </AlertDescription>
+        </Alert>}
+        {overwrittenTargets.length > 0 && <p className="text-sm text-destructive">其中 {overwrittenTargets.length} 个账号有独有内容；确认后，它们现有的会话内容会被完整替换。</p>}
+        {blockedTargets.length > 0 && <div role="alert" className="space-y-1 rounded-lg bg-muted p-3 text-sm">
+          <p className="font-medium">目前无法统一全部账号</p>
+          {blockedTargets.map((target) => <p key={target.memberId} className="break-words text-muted-foreground">{target.accountName}：{target.issue}</p>)}
+        </div>}
+        {blockedTargets.length === 0 && <p className="text-xs text-muted-foreground">将更新 {changedTargets.length} 个账号。执行前会重新校验各副本内容；若内容已变化，操作会停止并报告结果。</p>}
+        <AlertDialogFooter>
+          <AlertDialogCancel disabled={props.busy}>取消</AlertDialogCancel>
+          {blockedTargets.length === 0 && <DemoAction><Button variant={overwrittenTargets.length > 0 ? "destructive" : "default"} disabled={props.busy} onClick={() => void props.onConfirmUnify()}>{props.busy ? "处理中…" : restartVariants.length ? "确认同步并重启" : "确认统一"}</Button></DemoAction>}
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
   </section>;
 }
 
 function MemberStatus({ status, equal }: { status: SessionGroupMemberDetail["versionStatus"]; equal: boolean }) {
   const labels: Record<typeof status, string> = {
-    latest: equal ? "内容一致" : "较新内容", behind: "内容落后", diverge: "存在分歧",
+    latest: equal ? "内容一致" : "内容最新", behind: "内容落后", diverge: "存在分歧",
     missing: "内容缺失", unknown: "无法确认", stale: "已失效", superseded: "已替代",
   };
   const variant = status === "latest" ? "success" : ["behind", "diverge", "missing"].includes(status) ? "warning" : "outline";
-  return <Badge variant={variant} className="text-[11px] font-medium">{labels[status]}</Badge>;
+  return <Badge variant={variant} className="text-[10px] font-medium">{labels[status]}</Badge>;
 }
 
 function formatDate(timestamp: number): string {

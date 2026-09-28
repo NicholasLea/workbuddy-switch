@@ -390,11 +390,12 @@ pub enum SyncVerdict {
     Identical,
     /// 目标内容被来源完整包含（目标为来源的严格有序前缀）：默认勾选快进。
     FastForward,
-    /// 来源等于共同基线、目标已变化：仅目标变化，不写目标。
+    /// 仅目标变化（来源等于共同基线），或来源是目标的严格有序前缀：
+    /// 普通同步不写目标；组级统一可显式覆盖。
     Ahead,
     /// 双方都有变化，或来源重写/重排/压缩：默认不勾，可显式覆盖。
     Diverge,
-    /// 成员/文件无效、内容不可验证或缺可验证基线：禁止同步。
+    /// 成员/文件无效、内容不可验证，或双方互不为严格有序前缀且缺可验证基线：禁止同步。
     Unknown,
 }
 
@@ -409,8 +410,7 @@ impl SyncVerdict {
         }
     }
 
-    /// 是否允许用户勾选执行：ahead 由目标侧承担、identical 无需动作，
-    /// unknown 一律禁止（含显式覆盖）。
+    /// 普通同步是否允许勾选；组级统一的显式覆盖独立于此。
     pub fn is_actionable(self) -> bool {
         matches!(self, SyncVerdict::FastForward | SyncVerdict::Diverge)
     }
@@ -420,6 +420,7 @@ impl SyncVerdict {
         match mode {
             SyncMode::FastForward => self == SyncVerdict::FastForward,
             SyncMode::Overwrite => self == SyncVerdict::Diverge,
+            SyncMode::UnifyOverwrite => self == SyncVerdict::Ahead,
         }
     }
 
@@ -441,6 +442,8 @@ pub enum SyncMode {
     FastForward,
     /// 用户显式选择的覆盖：必须仍为有效可比较的冲突。
     Overwrite,
+    /// 用户选择整组保留来源副本时，明确覆盖仅目标有改动的副本。
+    UnifyOverwrite,
 }
 
 impl SyncMode {
@@ -448,6 +451,7 @@ impl SyncMode {
         match self {
             SyncMode::FastForward => "fastForward",
             SyncMode::Overwrite => "overwrite",
+            SyncMode::UnifyOverwrite => "unifyOverwrite",
         }
     }
 
@@ -456,6 +460,7 @@ impl SyncMode {
         match raw.trim() {
             "fastForward" => Ok(SyncMode::FastForward),
             "overwrite" => Ok(SyncMode::Overwrite),
+            "unifyOverwrite" => Ok(SyncMode::UnifyOverwrite),
             other => Err(format!("未知的同步模式：{other}")),
         }
     }
@@ -522,15 +527,26 @@ fn multiset_counts(source: &[String], target: &[String]) -> (usize, usize, usize
     (source.len() - common, target.len() - common, common)
 }
 
+/// 镜像前缀（目标已完整包含来源）的 ahead 文案：本次没有可写内容，并给出目标多出的条数。
+fn mirror_ahead_reason(counts: (usize, usize, usize)) -> String {
+    format!(
+        "目标账号已包含当前账号的全部内容，另多出 {} 条，本次不会同步过去",
+        counts.1
+    )
+}
+
 /// 判定来源 A 与目标 B 能否同步（design §3.2，顺序不可调换）。
 ///
 /// 1. 成员/文件无效或内容不可验证 → [`SyncVerdict::Unknown`]；
 /// 2. A 与 B 有序一致 → [`SyncVerdict::Identical`]；
 /// 3. B 是 A 的严格有序前缀 → [`SyncVerdict::FastForward`]（不依赖基线，
 ///    对齐 git fast-forward 的 ancestor 语义：目标内容被来源完整包含，追加同步零覆盖）；
-/// 4. 无可验证共同基线 → [`SyncVerdict::Unknown`]；
+/// 4. 无可验证共同基线：A 是 B 的严格有序前缀 → [`SyncVerdict::Ahead`]（目标已完整包含来源，
+///    普通同步没有可写内容；同样不依赖基线、不授权任何写入），其余 → [`SyncVerdict::Unknown`]；
 /// 5. A 等于基线、B 已变化 → [`SyncVerdict::Ahead`]；
-/// 6. 其余（双方变化、来源重写/重排/压缩）→ [`SyncVerdict::Diverge`]。
+/// 6. A 是 B 的严格有序前缀、B 已偏离基线 → [`SyncVerdict::Ahead`]（镜像规则；B 恰好停在
+///    基线属于来源侧被删减/回滚，保持下一条的显式覆盖入口）；
+/// 7. 其余（双方变化、来源重写/重排/压缩）→ [`SyncVerdict::Diverge`]。
 ///
 /// 纯函数：不读文件、不写文件、无时间依赖。
 pub fn decide_sync(
@@ -582,6 +598,14 @@ pub fn decide_sync(
         );
     }
     let Some(record) = baseline.ready() else {
+        // 目标已完整包含来源（A ⊊ B 的镜像）：普通同步没有可写内容，
+        // 与祖先快进同一原则，不依赖基线即可判定，且不授权任何写入。
+        if is_strict_ordered_extension(
+            &source.normalized.line_digests,
+            &target.normalized.line_digests,
+        ) {
+            return SyncDecision::decide(SyncVerdict::Ahead, counts, mirror_ahead_reason(counts));
+        }
         return SyncDecision::unknown(
             baseline
                 .unusable_reason()
@@ -594,6 +618,15 @@ pub fn decide_sync(
             counts,
             format!("只有目标账号新增 {} 条，这次不会同步过去", counts.1),
         );
+    }
+    // A 是 B 的严格有序前缀（目标已完整包含来源）：本次没有可写内容 → ahead。
+    // B 恰好停在基线 → 是来源侧被删减/回滚，维持 diverge 的显式覆盖入口。
+    if is_strict_ordered_extension(
+        &source.normalized.line_digests,
+        &target.normalized.line_digests,
+    ) && target.normalized.line_digests != record.line_digests
+    {
+        return SyncDecision::decide(SyncVerdict::Ahead, counts, mirror_ahead_reason(counts));
     }
     SyncDecision::decide(
         SyncVerdict::Diverge,
@@ -2623,8 +2656,9 @@ mod tests {
         );
     }
 
-    /// 反向前缀不得判快进（回归保护）：A 是 B 的严格前缀（目标领先）时前缀规则不适用，
-    /// 只有目标变化 → 仍是 ahead；无基线时同样不授权写入 → 仍是 unknown。
+    /// 反向前缀不得判快进（回归保护）：A 是 B 的严格前缀（目标领先）时前缀规则不适用。
+    /// 来源等于基线 → 原有文案的 ahead；无基线时镜像规则同样判 ahead（口径 A：
+    /// 镜像关系不依赖基线，改造前无基线回落 unknown），两种情形都不授权任何写入。
     #[test]
     fn ahead_stays_when_target_extends_source() {
         let source = records(5, 0);
@@ -2647,22 +2681,82 @@ mod tests {
         );
         assert_eq!(
             decision.verdict,
-            SyncVerdict::Unknown,
-            "反向前缀不构成祖先关系，无基线时不得写入"
+            SyncVerdict::Ahead,
+            "镜像前缀不依赖基线，无基线时同样判 ahead 且不得写入"
+        );
+        assert!(!decision.default_checked);
+        assert!(decision.verdict.available_modes().is_empty());
+        assert_eq!(decision.extra_a, 0);
+        assert_eq!(decision.extra_b, 4);
+    }
+
+    /// 镜像前缀 + 有基线 + 目标已偏离基线（本机复现态：来源 7 条 ⊊ 目标 9 条、配对基线 4 条）
+    /// → ahead，本次没有可写内容（改造前落入兜底 diverge，会给出把目标新记录回滚掉的覆盖入口）。
+    #[test]
+    fn ahead_when_source_is_ordered_prefix_of_target_with_baseline() {
+        let baseline = records(4, 0);
+        let source = records(7, 0);
+        let target = records(9, 0);
+        let decision = decide_sync(
+            &content_from(&source),
+            &content_from(&target),
+            &BaselineState::Ready(baseline_from(&baseline)),
+        );
+        assert_eq!(decision.verdict, SyncVerdict::Ahead);
+        assert!(!decision.default_checked);
+        assert!(decision.verdict.available_modes().is_empty());
+        assert_eq!(decision.extra_a, 0);
+        assert_eq!(decision.extra_b, 2);
+        assert_eq!(decision.common, 7);
+        assert!(
+            decision.reason.contains("已包含") && decision.reason.contains("2 条"),
+            "{}",
+            decision.reason
         );
     }
 
-    /// 双方都变化 → diverge：默认不勾，但可显式覆盖。
+    /// 镜像前缀不依赖基线：无基线 / 基线不可验证时，A 是 B 的严格有序前缀同样判 ahead
+    /// （改造前为 unknown；两者都不授权任何写入，只是提示更准确）。
+    #[test]
+    fn ahead_without_baseline_when_source_is_ordered_prefix_of_target() {
+        let source = records(5, 0);
+        let target = records(9, 0);
+        for baseline in [
+            BaselineState::Missing,
+            BaselineState::Unverifiable("上次同步的记录缺失或已损坏".to_string()),
+        ] {
+            let decision = decide_sync(&content_from(&source), &content_from(&target), &baseline);
+            assert_eq!(decision.verdict, SyncVerdict::Ahead, "{baseline:?}");
+            assert!(!decision.default_checked);
+            assert!(decision.verdict.available_modes().is_empty());
+            assert_eq!(decision.extra_a, 0);
+            assert_eq!(decision.extra_b, 4);
+            assert!(
+                decision.reason.contains("已包含") && decision.reason.contains("4 条"),
+                "{}",
+                decision.reason
+            );
+        }
+    }
+
+    /// 双方都变化、且互不为前缀（真分叉）→ diverge：默认不勾，但可显式覆盖。
     #[test]
     fn verdict_diverge_when_both_sides_changed() {
         let base = records(5, 0);
+        // 目标写的是另一批新增记录：与来源的尾部互不相同，任一侧都不是对方的前缀。
+        let target = format!("{}{}", records(5, 0), records(5, 100));
         let decision = decide_sync(
             &content_from(&records(7, 0)),
-            &content_from(&records(10, 0)),
+            &content_from(&target),
             &BaselineState::Ready(baseline_from(&base)),
         );
         assert_eq!(decision.verdict, SyncVerdict::Diverge);
         assert!(!decision.default_checked);
+        assert_eq!(
+            decision.extra_a, 2,
+            "真分叉：来源尾部独有，不得被镜像前缀吞掉"
+        );
+        assert_eq!(decision.extra_b, 5, "真分叉：目标尾部独有");
         assert_eq!(
             decision.verdict.available_modes(),
             vec![SyncMode::Overwrite]
@@ -2700,7 +2794,7 @@ mod tests {
         assert_eq!(target_rewritten.verdict, SyncVerdict::Ahead);
     }
 
-    /// 相同多重集、顺序不同 → 不得判快进（extraB 为 0 也不代表安全）。
+    /// 相同多重集、顺序不同 → 不得判快进 / ahead（extraB 为 0 也不代表安全）。
     #[test]
     fn verdict_diverge_for_same_multiset_in_different_order() {
         let base_order = vec![0usize, 1, 2, 3];
@@ -2713,8 +2807,28 @@ mod tests {
         );
         assert_eq!(decision.verdict, SyncVerdict::Diverge);
         assert!(!decision.default_checked);
+        assert_ne!(
+            decision.verdict,
+            SyncVerdict::Ahead,
+            "重排后的等价多重集不得判 ahead"
+        );
         assert_eq!(decision.extra_a, 0, "多重集相同：差集为 0 只是解释信息");
         assert_eq!(decision.extra_b, 0);
+        assert_eq!(decision.common, 4);
+
+        // 目标另有新增（多重集包含来源，但顺序被重排、目标已偏离基线）：镜像分支只认有序前缀，
+        // 不得按多重集包含判 ahead。
+        let target = records_in_order(&[0, 1, 2, 3, 100]);
+        let decision = decide_sync(
+            &content_from(&source),
+            &content_from(&target),
+            &BaselineState::Ready(baseline_from(&base)),
+        );
+        assert_eq!(decision.verdict, SyncVerdict::Diverge);
+        assert_ne!(decision.verdict, SyncVerdict::Ahead);
+        assert!(!decision.verdict.allows(SyncMode::FastForward));
+        assert_eq!(decision.extra_a, 0);
+        assert_eq!(decision.extra_b, 1);
         assert_eq!(decision.common, 4);
     }
 
@@ -2850,6 +2964,9 @@ mod tests {
         assert!(SyncVerdict::FastForward.allows(SyncMode::FastForward));
         assert!(!SyncVerdict::FastForward.allows(SyncMode::Overwrite));
         assert!(SyncVerdict::Diverge.allows(SyncMode::Overwrite));
+        assert!(SyncVerdict::Ahead.allows(SyncMode::UnifyOverwrite));
+        assert!(!SyncVerdict::Diverge.allows(SyncMode::UnifyOverwrite));
+        assert!(!SyncVerdict::Unknown.allows(SyncMode::UnifyOverwrite));
         for verdict in [
             SyncVerdict::Unknown,
             SyncVerdict::Ahead,
@@ -2875,6 +2992,11 @@ mod tests {
                 &ready,
             ),
             decide_sync(
+                &content_from(&records(7, 0)),
+                &content_from(&format!("{}{}", records(5, 0), records(5, 100))),
+                &ready,
+            ),
+            decide_sync(
                 &content_from(&base),
                 &content_from(&base),
                 &BaselineState::Missing,
@@ -2887,7 +3009,7 @@ mod tests {
                 decision.reason
             );
         }
-        for decision in &decisions[..4] {
+        for decision in &decisions[..5] {
             assert!(decision.reason.contains("条"), "{}", decision.reason);
         }
     }

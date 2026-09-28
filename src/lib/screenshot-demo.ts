@@ -664,7 +664,10 @@ function buildDemoSessionGroups(
   ];
   return scenario.map((item, groupIndex) => {
     const groupId = `demo-${client}-${scope ?? "all"}-${groupIndex + 1}`;
-    const selectedAccounts = Array.from({ length: Math.min(item.count, memberAccounts.length) }, (_, index) => memberAccounts[index]);
+    const selectedAccounts = client === "workbuddy" && item.status === "diverge" && memberAccounts.length >= 5
+      ? [memberAccounts[1], memberAccounts[2], memberAccounts[4], memberAccounts[0], memberAccounts[3]]
+      : Array.from({ length: Math.min(item.count, memberAccounts.length) }, (_, index) => memberAccounts[index]);
+    const sharedBaseScenario = client === "workbuddy" && item.status === "diverge" && selectedAccounts.length === 5;
     const members = selectedAccounts.map((account, memberIndex) => {
       let versionStatus: SessionMemberVersionStatus = "latest";
       let contentState: "ready" | "missing" | "unavailable" = "ready";
@@ -674,7 +677,9 @@ function buildDemoSessionGroups(
         reason = "目标账号没有独有改动，来源账号新增 3 条，可以安全同步";
       } else if (item.status === "diverge") {
         versionStatus = "diverge";
-        reason = "双方都有更新；覆盖会替换目标账号的完整内容";
+        reason = sharedBaseScenario
+          ? memberIndex < 3 ? "与另外两个账号处于相同旧版；两条独立分支都包含此内容" : "从共同旧版新增了内容；与另一条分支的更新不同"
+          : "双方都有更新；覆盖会替换目标账号的完整内容";
       } else if (item.status === "missing" && memberIndex > 0) {
         versionStatus = "missing";
         contentState = "missing";
@@ -691,8 +696,12 @@ function buildDemoSessionGroups(
         versionStatus,
         title: item.title,
         projectLabel: client === "workbuddy" ? "项目 wb-switch" : "工作区 3c1f8a92",
-        updatedAt: Date.now() - (memberIndex + groupIndex * 2) * 1000 * 60 * 37,
-        recordCount: contentState === "ready" ? (item.status === "latest" ? 14 : Math.max(4, 14 - memberIndex * 3)) : null,
+        updatedAt: Date.now() - (sharedBaseScenario ? memberIndex < 3 ? 8 + memberIndex : memberIndex - 3 : memberIndex + groupIndex * 2) * 1000 * 60 * 37,
+        recordCount: contentState === "ready" ? (sharedBaseScenario ? memberIndex < 3 ? 14 : memberIndex === 3 ? 17 : 19 : item.status === "latest" ? 14 : Math.max(4, 14 - memberIndex * 3)) : null,
+        contentPreview: contentState === "ready" ? [
+          { speaker: "用户", text: item.status === "diverge" ? "整理长期未完成的任务，并确认下一步安排。" : "继续处理这个会话。" },
+          { speaker: "助手", text: sharedBaseScenario ? memberIndex < 3 ? "已整理共同旧版的待跟进事项。" : memberIndex === 3 ? "已补充国内版分支的处理记录。" : "已补充国际版分支的处理记录。" : item.status === "diverge" ? (memberIndex === 0 ? "已整理待跟进事项，建议先处理账号同步与会话列表。" : "已补充测试和发布前检查，建议先核对剩余问题。") : "已记录当前进度。" },
+        ] : [],
         contentState,
         reason,
         canBeSource: contentState === "ready",
@@ -711,7 +720,7 @@ function buildDemoSessionGroups(
       activeMemberCount: members.length,
       accountNames: members.map((member) => member.accountName),
       summaryStatus: item.status,
-      summaryText: item.status === "behind" ? "有副本落后，可安全同步" : item.status === "latest" ? "关联副本内容一致" : item.status === "diverge" ? "多个副本有不同更新，需要选择来源" : "有副本内容缺失",
+      summaryText: item.status === "behind" ? "有副本落后，可安全同步" : item.status === "latest" ? "关联副本内容一致" : sharedBaseScenario ? "3 个账号在共同旧版，另有 2 条独立更新" : item.status === "diverge" ? "多个副本有不同更新，需要选择来源" : "有副本内容缺失",
       safeSourceMemberId: item.status === "behind" || item.status === "latest" ? members[0].memberId : null,
       hasSafeSource: item.status === "behind" || item.status === "latest",
     };
@@ -720,6 +729,7 @@ function buildDemoSessionGroups(
       ...summary,
       members,
       addTargets: candidates.filter((account) => !linkedAccountIds.has(account.id)),
+      ...(sharedBaseScenario ? { divergence: { commonMemberIds: members.slice(0, 3).map((member) => member.memberId), branches: members.slice(3).map((member) => [member.memberId]) } } : {}),
     };
   });
 }
@@ -767,7 +777,7 @@ export function screenshotDemoResponse(command: string, args?: Record<string, un
       if (!groupClient || (groupClient === "codebuddyIde" && !groupScope) || (groupClient !== "codebuddyIde" && groupScope)) {
         throw new Error("会话客户端或档位参数无效");
       }
-      const groups = demoGroups.map(({ members: _members, addTargets: _targets, ...summary }) => summary);
+      const groups = demoGroups.map(({ members: _members, addTargets: _targets, divergence: _divergence, ...summary }) => summary);
       return { client: groupClient, variantScope: groupScope, storeStatus: "ready", groups } satisfies SessionGroupList;
     }
     case "get_session_group": {

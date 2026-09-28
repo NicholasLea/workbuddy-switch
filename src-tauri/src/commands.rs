@@ -814,6 +814,23 @@ pub async fn sync_session_group_pair(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+pub async fn sync_session_group_unify(
+    client: String,
+    variant_scope: Option<String>,
+    group_id: String,
+    source_member_id: String,
+    targets: Vec<session_groups::GroupUnifyTarget>,
+) -> Result<Value, String> {
+    let client = session_groups::SessionClient::parse(&client)?;
+    let scope = session_groups::parse_variant_scope(variant_scope.as_deref())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        session_groups::sync_unify_batch(client, scope, &group_id, &source_member_id, &targets)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command(rename_all = "camelCase")]
 pub async fn sync_session_group_safe_batch(
     client: String,
     variant_scope: Option<String>,

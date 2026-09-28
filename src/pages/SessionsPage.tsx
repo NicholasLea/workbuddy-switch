@@ -13,7 +13,8 @@ import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import * as api from "@/lib/api";
-import type { SessionGroupClient, SessionGroupDetail, SessionGroupMemberDetail, SessionGroupPairPreview, SessionGroupSummary, WbVariant } from "@/lib/types";
+import type { SessionGroupClient, SessionGroupCurrentAccount, SessionGroupDetail, SessionGroupMemberDetail, SessionGroupSummary, SessionGroupUnifyPlan, SessionSyncMode, WbVariant } from "@/lib/types";
+import { variantLabel } from "@/lib/variant";
 import { useAccountsStore } from "@/stores/accounts";
 
 const PAGE_SIZE = 8;
@@ -42,12 +43,12 @@ export default function SessionsPage() {
   const [page, setPage] = useState(1);
   const [sourceMemberId, setSourceMemberId] = useState("");
   const [addTargetId, setAddTargetId] = useState("");
-  const [previews, setPreviews] = useState<Record<string, SessionGroupPairPreview>>({});
-  const [pendingMember, setPendingMember] = useState<string | null>(null);
+  const [unifyPlan, setUnifyPlan] = useState<SessionGroupUnifyPlan | null>(null);
+  const [unifyLoading, setUnifyLoading] = useState<string | null>(null);
+  const [currentAccounts, setCurrentAccounts] = useState<SessionGroupCurrentAccount[]>([]);
   const [actionBusy, setActionBusy] = useState(false);
   const [detailOpen, setDetailOpen] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
-  const [versionFilter, setVersionFilter] = useState("all");
   const [contentWidth, setContentWidth] = useState(0);
   const rootRef = useRef<HTMLDivElement>(null);
   const openerRef = useRef<HTMLElement | null>(null);
@@ -77,6 +78,23 @@ export default function SessionsPage() {
   contextRef.current = { client, scope, selectedGroupId, sourceMemberId };
   const listContextKey = `${client}:${scope ?? "all"}`;
   const detailContextKey = `${listContextKey}:${selectedGroupId ?? "none"}`;
+
+  useEffect(() => {
+    if (!selectedGroupId) { setCurrentAccounts([]); return; }
+    let live = true;
+    setCurrentAccounts([]);
+    const reads = client === "workbuddy"
+      ? [api.getStatus("cn").then((status) => ({ variant: "cn" as const, uid: status.current?.uid, running: status.running })),
+        api.getStatus("ai").then((status) => ({ variant: "ai" as const, uid: status.current?.uid, running: status.running }))]
+      : client === "codebuddyIde"
+        ? [api.getCodebuddyCnIdeStatus().then((status) => ({ variant: "cn" as const, accountId: status.activeAccountId })),
+          api.getCodebuddyIdeStatus().then((status) => ({ variant: "ai" as const, accountId: status.activeAccountId }))]
+        : [api.getVscodeExtStatus().then((status) => ({ accountId: status.activeAccountId }))];
+    void Promise.allSettled(reads).then((results) => {
+      if (live) setCurrentAccounts(results.flatMap((result) => result.status === "fulfilled" ? [result.value] : []));
+    });
+    return () => { live = false; };
+  }, [client, selectedGroupId, detail]);
 
   useEffect(() => {
     if (accounts.length === 0) void fetchAll();
@@ -112,8 +130,8 @@ export default function SessionsPage() {
     setDetail(null);
     setSelectedGroupId(null);
     previewRequestId.current += 1;
-    setPreviews({});
-    setPendingMember(null);
+    setUnifyPlan(null);
+    setUnifyLoading(null);
     api.listSessionGroups(client, scope).then((result) => {
       if (!live || listRequestId.current !== requestId || `${contextRef.current.client}:${contextRef.current.scope ?? "all"}` !== key) return;
       setGroups(result.groups);
@@ -138,8 +156,8 @@ export default function SessionsPage() {
       setSourceMemberId("");
       setAddTargetId("");
       previewRequestId.current += 1;
-      setPreviews({});
-      setPendingMember(null);
+      setUnifyPlan(null);
+      setUnifyLoading(null);
       return;
     }
     let live = true;
@@ -149,8 +167,8 @@ export default function SessionsPage() {
     setDetailError(null);
     setDetailLoading(true);
     previewRequestId.current += 1;
-    setPreviews({});
-    setPendingMember(null);
+    setUnifyPlan(null);
+    setUnifyLoading(null);
     api.getSessionGroup(client, selectedGroupId, scope).then((result) => {
       if (!live || detailRequestId.current !== requestId || `${contextRef.current.client}:${contextRef.current.scope ?? "all"}:${contextRef.current.selectedGroupId ?? "none"}` !== key) return;
       setDetail(result);
@@ -170,72 +188,101 @@ export default function SessionsPage() {
     const result = groups.filter((group) => {
       const matchesQuery = !needle || [group.title, group.projectLabel, ...group.accountNames].some((value) => value.toLocaleLowerCase().includes(needle));
       const matchesStatus = statusFilter === "all" || group.summaryStatus === statusFilter;
-      return matchesQuery && matchesStatus && (versionFilter === "all" || group.groupVariant === versionFilter);
+      return matchesQuery && matchesStatus;
     });
     result.sort((left, right) => sortOrder === "oldest" ? left.latestActivityAt - right.latestActivityAt : left.latestActivityAt === right.latestActivityAt ? left.title.localeCompare(right.title) : right.latestActivityAt - left.latestActivityAt);
     return result;
-  }, [groups, query, statusFilter, sortOrder, versionFilter]);
+  }, [groups, query, statusFilter, sortOrder]);
   const pageCount = Math.max(1, Math.ceil(filteredGroups.length / PAGE_SIZE));
   const currentPage = Math.min(page, pageCount);
   const visibleGroups = filteredGroups.slice((currentPage - 1) * PAGE_SIZE, currentPage * PAGE_SIZE);
 
-  useEffect(() => { setPage(1); }, [query, statusFilter, sortOrder, client, scope, versionFilter]);
+  useEffect(() => { setPage(1); }, [query, statusFilter, sortOrder, client, scope]);
 
   function changeClient(value: string) {
     const next = value as SessionGroupClient;
     setClient(next);
     setDetailOpen(false);
-    setVersionFilter("all");
     setSelectedGroupId(null);
     setDetail(null);
     previewRequestId.current += 1;
-    setPreviews({});
+    setUnifyPlan(null);
+    setUnifyLoading(null);
   }
 
-  async function previewMember(member: SessionGroupMemberDetail) {
-    if (!detail || !sourceMemberId || sourceMemberId === member.memberId) return;
+  async function prepareUnify(source: SessionGroupMemberDetail) {
+    if (!detail || !source.canBeSource || actionBusy || unifyLoading) return;
     const requestId = ++previewRequestId.current;
-    const requestKey = `${detailContextKey}:${sourceMemberId}:${member.memberId}`;
-    const isCurrent = () => previewRequestId.current === requestId && `${contextRef.current.client}:${contextRef.current.scope ?? "all"}:${contextRef.current.selectedGroupId ?? "none"}:${contextRef.current.sourceMemberId}:${member.memberId}` === requestKey;
-    setPendingMember(member.memberId);
-    try {
-      const preview = await api.previewSessionGroupPair({
-        client,
-        groupId: detail.groupId,
-        sourceMemberId,
-        targetMemberId: member.memberId,
-        variantScope: scope,
-      });
-      if (isCurrent()) {
-        setPreviews((current) => ({ ...current, [member.memberId]: preview }));
-      }
-    } catch (error) {
-      if (isCurrent()) toast.error("无法检查这两个副本", { description: api.asError(error) });
-    } finally {
-      if (isCurrent()) setPendingMember(null);
-    }
+    const key = detailContextKey;
+    const groupId = detail.groupId;
+    const targets = detail.members.filter((member) => member.linkState === "active" && member.memberId !== source.memberId);
+    setUnifyPlan(null);
+    setUnifyLoading(source.memberId);
+    const results = await Promise.allSettled(targets.map((target) => api.previewSessionGroupPair({
+      client, groupId, sourceMemberId: source.memberId, targetMemberId: target.memberId, variantScope: scope,
+    })));
+    if (previewRequestId.current !== requestId || `${contextRef.current.client}:${contextRef.current.scope ?? "all"}:${contextRef.current.selectedGroupId ?? "none"}` !== key) return;
+    setUnifyLoading(null);
+    setUnifyPlan({
+      client, groupId, sourceMemberId: source.memberId, sourceName: source.accountName,
+      targets: targets.map((target, index) => {
+        const result = results[index];
+        return { memberId: target.memberId, accountName: target.accountName,
+          preview: result.status === "fulfilled" ? result.value : null,
+          error: result.status === "rejected" ? api.asError(result.reason) : null };
+      }),
+    });
   }
 
-  async function syncMember(member: SessionGroupMemberDetail, mode: "fastForward" | "overwrite") {
-    const preview = previews[member.memberId];
-    if (!detail || !sourceMemberId || !preview?.previewToken || !preview.availableModes.includes(mode)
-      || preview.sourceMemberId !== sourceMemberId || preview.targetMemberId !== member.memberId
-      || preview.groupId !== detail.groupId || preview.client !== client) return;
+  async function confirmUnify() {
+    const plan = unifyPlan;
+    if (!plan || !detail || plan.client !== client || plan.groupId !== detail.groupId || actionBusy) return;
+    const actions = plan.targets.flatMap((target) => {
+      const preview = target.preview;
+      if (!preview || preview.verdict === "identical") return [];
+      const mode: SessionSyncMode | undefined = ["fastForward", "overwrite", "unifyOverwrite"].find(
+        (candidate) => preview.availableModes.includes(candidate as SessionSyncMode),
+      ) as SessionSyncMode | undefined;
+      return mode && preview.previewToken && preview.client === client && preview.groupId === plan.groupId
+        && preview.sourceMemberId === plan.sourceMemberId && preview.targetMemberId === target.memberId
+        ? [{ target, preview, mode }] : [];
+    });
+    if (plan.targets.some((target) => target.error || !target.preview
+      || target.preview.client !== client || target.preview.groupId !== plan.groupId
+      || target.preview.sourceMemberId !== plan.sourceMemberId || target.preview.targetMemberId !== target.memberId
+      || (target.preview.verdict !== "identical" && !actions.some((action) => action.target.memberId === target.memberId)))) return;
+    setUnifyPlan(null);
     setActionBusy(true);
     try {
-      const report = await api.syncSessionGroupPair({
-        client,
-        groupId: detail.groupId,
-        sourceMemberId,
-        targetMemberId: member.memberId,
-        previewToken: preview.previewToken,
-        mode,
-        variantScope: scope,
-      });
-      notifyResult(report, member.accountName);
+      if (client === "workbuddy" && actions.length > 0) {
+        const report = await api.syncSessionGroupUnify({
+          client, groupId: plan.groupId, sourceMemberId: plan.sourceMemberId,
+          targets: actions.map(({ target, preview, mode }) => ({ targetMemberId: target.memberId, previewToken: preview.previewToken!, mode })),
+        });
+        notifyResult(report);
+      } else {
+        const combined: { synced: unknown[]; skipped: unknown[]; errors: { error: string }[]; needsRecovery: boolean } = { synced: [], skipped: [], errors: [], needsRecovery: false };
+        for (const { target, preview, mode } of actions) {
+          try {
+            const report = await api.syncSessionGroupPair({
+              client, groupId: plan.groupId, sourceMemberId: plan.sourceMemberId, targetMemberId: target.memberId,
+              previewToken: preview.previewToken!, mode, variantScope: scope,
+            });
+            combined.synced.push(...report.synced);
+            combined.skipped.push(...report.skipped);
+            combined.errors.push(...report.errors);
+            combined.needsRecovery ||= Boolean(report.needsRecovery);
+            if (report.needsRecovery) break;
+          } catch (error) {
+            combined.errors.push({ error: `${target.accountName}：${api.asError(error)}` });
+            break;
+          }
+        }
+        notifyResult(combined);
+      }
       await reloadSelectedGroup();
     } catch (error) {
-      toast.error("会话同步失败", { description: api.asError(error) });
+      toast.error("统一会话内容失败", { description: api.asError(error) });
     } finally {
       setActionBusy(false);
     }
@@ -286,8 +333,8 @@ export default function SessionsPage() {
     setDetailLoading(true);
     setDetailError(null);
     previewRequestId.current += 1;
-    setPreviews({});
-    setPendingMember(null);
+    setUnifyPlan(null);
+    setUnifyLoading(null);
     await reloadGroups();
     if (`${contextRef.current.client}:${contextRef.current.scope ?? "all"}:${contextRef.current.selectedGroupId ?? "none"}` !== key) return;
     if (!selectedGroupId) return;
@@ -298,8 +345,8 @@ export default function SessionsPage() {
       setSourceMemberId(next.safeSourceMemberId ?? sourceMemberId);
       setAddTargetId(next.addTargets[0]?.id ?? "");
       previewRequestId.current += 1;
-      setPreviews({});
-      setPendingMember(null);
+      setUnifyPlan(null);
+      setUnifyLoading(null);
     } catch (error) {
       if (`${contextRef.current.client}:${contextRef.current.scope ?? "all"}:${contextRef.current.selectedGroupId ?? "none"}` === key && detailRequestId.current === requestId) setDetailError(api.asError(error));
     } finally {
@@ -310,12 +357,13 @@ export default function SessionsPage() {
   const detailPanel = (
     <GroupDetailPanel
       client={client} detail={detail} sourceMemberId={sourceMemberId}
-      setSourceMemberId={(id) => { previewRequestId.current += 1; setSourceMemberId(id); setPreviews({}); setPendingMember(null); }}
+      currentAccounts={currentAccounts}
+      setSourceMemberId={setSourceMemberId}
       addTargetId={addTargetId} setAddTargetId={setAddTargetId}
-      previews={previews} pendingMember={pendingMember} busy={actionBusy || detailLoading || !!detailError}
+      unifyPlan={unifyPlan} unifyLoading={unifyLoading} setUnifyPlan={setUnifyPlan} busy={actionBusy || detailLoading || !!detailError}
       error={detailError} loading={detailLoading} onClose={closeDetail}
       onRetry={() => { setDetailError(null); void reloadSelectedGroup(); }}
-      onPreview={previewMember} onSync={syncMember} onBatchSync={syncSafeBatch} onAdd={addMember}
+      onPrepareUnify={prepareUnify} onConfirmUnify={confirmUnify} onBatchSync={syncSafeBatch} onAdd={addMember}
       addOpen={addOpen} setAddOpen={setAddOpen} fullPage={false}
     />
   );
@@ -323,14 +371,13 @@ export default function SessionsPage() {
     ["all", "全部"], ["behind", "待同步"], ["diverge", "有分歧"], ["latest", "内容一致"],
     ["missing", "内容缺失"], ["unknown", "无法确认"],
   ];
-  const versionGroups = groups.filter((group) => versionFilter === "all" || group.groupVariant === versionFilter);
   const copyGroup = visibleGroups.find((group) => group.groupId === selectedGroupId);
   const pages = Array.from({ length: pageCount }, (_, index) => index + 1)
     .filter((value) => value === 1 || value === pageCount || Math.abs(value - currentPage) <= 1);
 
   return (
-    <div data-detail-mode={detailMode} className="min-w-0">
-      <div ref={rootRef} className="mx-auto flex w-full max-w-[1180px] min-w-0 flex-col px-6 py-8 sm:px-8 sm:py-9">
+    <div data-detail-mode={detailMode} className="mx-auto w-full max-w-[1180px] min-w-0 px-6 py-8 sm:px-8 sm:py-9">
+      <div ref={rootRef} className="flex min-w-0 flex-col">
         <header className="mb-6">
           <div className="flex min-w-0 flex-wrap items-start justify-between gap-4">
             <div className="min-w-0">
@@ -360,15 +407,16 @@ export default function SessionsPage() {
           </div>
           <div className="flex flex-wrap gap-3">
             <div className="relative min-w-0 basis-48 flex-1"><Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" /><Input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索会话、项目或账号…" aria-label="搜索会话、项目或账号" className="h-10 bg-background pl-10" /></div>
-            <Select value={client === "codebuddyIde" ? variantScope : versionFilter} onValueChange={(value) => {
-              if (client === "codebuddyIde") { setVariantScope(value as WbVariant); setSelectedGroupId(null); setDetailOpen(false); }
-              else setVersionFilter(value);
-            }}><SelectTrigger className="h-10 w-36 bg-background" aria-label="按版本筛选"><SelectValue /></SelectTrigger><SelectContent>{client !== "codebuddyIde" && <SelectItem value="all">全部版本</SelectItem>}<SelectItem value="cn">国内版</SelectItem><SelectItem value="ai">国际版</SelectItem></SelectContent></Select>
+            {client === "codebuddyIde" && <Select value={variantScope} onValueChange={(value) => { setVariantScope(value as WbVariant); setSelectedGroupId(null); setDetailOpen(false); }}><SelectTrigger className="h-10 w-36 bg-background" aria-label="选择 CodeBuddy IDE 档位"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="cn">国内版</SelectItem><SelectItem value="ai">国际版</SelectItem></SelectContent></Select>}
           </div>
           <div className="my-4 flex flex-wrap items-center justify-between gap-2">
-            <div className="flex flex-wrap gap-1" aria-label="按状态筛选">
-              {statusOptions.filter(([value]) => ["all", "behind", "diverge", "latest"].includes(value) || value === statusFilter || versionGroups.some((group) => group.summaryStatus === value)).map(([value, label]) => <Button key={value} size="sm" variant="ghost" aria-pressed={statusFilter === value} onClick={() => setStatusFilter(value)} className={`rounded-full px-3 ${statusFilter === value ? "bg-brand/10 text-brand" : "text-muted-foreground"}`}>{label}<span className="rounded-full bg-muted/70 px-1.5 text-xs tabular-nums">{value === "all" ? versionGroups.length : versionGroups.filter((group) => group.summaryStatus === value).length}</span></Button>)}
-            </div>
+            <Tabs value={statusFilter} onValueChange={setStatusFilter} className="min-w-0 max-w-full gap-0">
+              <TabsList className="h-auto max-w-full flex-wrap justify-start gap-0.5" aria-label="按状态筛选">
+                {statusOptions.filter(([value]) => ["all", "behind", "diverge", "latest"].includes(value) || value === statusFilter || groups.some((group) => group.summaryStatus === value)).map(([value, label]) => <TabsTrigger key={value} value={value} className="h-8 gap-1.5 px-2.5">
+                  {label}<span className={`rounded-full px-1.5 text-[11px] tabular-nums ${statusFilter === value ? "bg-muted" : "bg-background/70"}`}>{value === "all" ? groups.length : groups.filter((group) => group.summaryStatus === value).length}</span>
+                </TabsTrigger>)}
+              </TabsList>
+            </Tabs>
             <Select value={sortOrder} onValueChange={setSortOrder}><SelectTrigger size="sm" className="w-28 border-0 bg-transparent shadow-none" aria-label="排序方式"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="recent">最近更新</SelectItem><SelectItem value="oldest">最早更新</SelectItem></SelectContent></Select>
           </div>
           {(storeStatus === "unavailable" || storeError) && <p role="status" className="mb-3 rounded-lg border border-amber-500/30 p-3 text-sm text-muted-foreground">{storeError ?? "关联组存储暂不可用，当前只展示可读取的数据。"}</p>}
@@ -420,11 +468,11 @@ function formatDate(timestamp: number): string {
   return new Intl.DateTimeFormat("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }).format(timestamp);
 }
 
-function notifyResult(report: { synced?: unknown[]; skipped?: unknown[]; errors?: { error: string }[]; needsRecovery?: boolean; temporaryFiles?: { reason: string }[] }, targetName?: string) {
+function notifyResult(report: { synced?: unknown[]; skipped?: unknown[]; errors?: { error: string }[]; needsRecovery?: boolean; temporaryFiles?: { reason: string }[]; restartedVariants?: WbVariant[] }, targetName?: string) {
   const synced = report.synced?.length ?? 0;
   const skipped = report.skipped?.length ?? 0;
   const errors = report.errors ?? [];
-  if (synced > 0) toast.success(targetName ? `已同步到「${targetName}」` : `已同步 ${synced} 个会话`, { description: `完成 ${synced} 项` });
+  if (synced > 0) toast.success(targetName ? `已同步到「${targetName}」` : `已同步 ${synced} 个会话`, { description: `完成 ${synced} 项${report.restartedVariants?.length ? `，已重新打开 ${report.restartedVariants.map(variantLabel).join("、")}` : ""}` });
   if (skipped > 0) toast.warning(`有 ${skipped} 项跳过`, { description: "预览过期或复核后不再符合安全条件的项不会计为成功。" });
   if (errors.length > 0) toast.error("部分会话同步失败", { description: errors.map((item) => item.error).join("；") });
   if (report.needsRecovery) toast.error("会话操作待恢复", { description: report.temporaryFiles?.map((item) => item.reason).join("；") || "已保留恢复所需材料。" });

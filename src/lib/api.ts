@@ -32,6 +32,7 @@ import type {
   SessionLinksPreview,
   SessionSyncReport,
   SessionSyncSelection,
+  SessionSyncMode,
   SessionGroupClient,
   SessionGroupList,
   SessionGroupDetail,
@@ -152,6 +153,7 @@ const ROUTES: Record<string, Route> = {
   get_session_group: { method: "POST", path: "/api/session-groups/detail" },
   preview_session_group_pair: { method: "POST", path: "/api/session-groups/preview" },
   sync_session_group_pair: { method: "POST", path: "/api/session-groups/sync" },
+  sync_session_group_unify: { method: "POST", path: "/api/session-groups/unify" },
   sync_session_group_safe_batch: { method: "POST", path: "/api/session-groups/sync-safe" },
   add_session_group_member: { method: "POST", path: "/api/session-groups/add" },
   get_checkin_status: { method: "GET", path: "/api/checkin/status" },
@@ -620,11 +622,21 @@ export function syncSessionGroupPair(args: {
   sourceMemberId: string;
   targetMemberId: string;
   previewToken: string;
-  mode: "fastForward" | "overwrite";
+  mode: SessionSyncMode;
   variantScope?: WbVariant;
 }): Promise<SessionGroupActionReport> {
   if (demoModeEnabled) return Promise.reject(new Error(DEMO_UNAVAILABLE_MESSAGE));
   return call("sync_session_group_pair", args as unknown as Record<string, unknown>);
+}
+
+export function syncSessionGroupUnify(args: {
+  client: "workbuddy";
+  groupId: string;
+  sourceMemberId: string;
+  targets: { targetMemberId: string; previewToken: string; mode: SessionSyncMode }[];
+}): Promise<SessionGroupActionReport> {
+  if (demoModeEnabled) return Promise.reject(new Error(DEMO_UNAVAILABLE_MESSAGE));
+  return call("sync_session_group_unify", args as unknown as Record<string, unknown>);
 }
 
 export function syncSessionGroupSafeBatch(client: SessionGroupClient, groupId: string, variantScope?: WbVariant): Promise<SessionGroupActionReport> {

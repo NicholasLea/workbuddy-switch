@@ -146,6 +146,10 @@ pub fn router() -> Router {
             post(api_sync_session_group_pair),
         )
         .route(
+            "/api/session-groups/unify",
+            post(api_sync_session_group_unify),
+        )
+        .route(
             "/api/session-groups/sync-safe",
             post(api_sync_session_group_safe_batch),
         )
@@ -1107,6 +1111,33 @@ async fn api_sync_session_group_pair(Json(body): Json<Value>) -> Response {
         body.get("mode").and_then(Value::as_str).unwrap_or(""),
     );
     match session_groups::sync_pair(client, scope, args.0, args.1, args.2, args.3, args.4) {
+        Ok(value) => json_ok(value),
+        Err(error) => json_err(error, StatusCode::BAD_REQUEST),
+    }
+}
+
+async fn api_sync_session_group_unify(Json(body): Json<Value>) -> Response {
+    let (client, scope) = match session_group_request(&body) {
+        Ok(value) => value,
+        Err(error) => return json_err(error, StatusCode::BAD_REQUEST),
+    };
+    let targets = match serde_json::from_value::<Vec<session_groups::GroupUnifyTarget>>(
+        body.get("targets").cloned().unwrap_or(Value::Null),
+    ) {
+        Ok(value) => value,
+        Err(error) => {
+            return json_err(
+                format!("目标副本参数无效：{error}"),
+                StatusCode::BAD_REQUEST,
+            )
+        }
+    };
+    let group_id = body.get("groupId").and_then(Value::as_str).unwrap_or("");
+    let source_member_id = body
+        .get("sourceMemberId")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    match session_groups::sync_unify_batch(client, scope, group_id, source_member_id, &targets) {
         Ok(value) => json_ok(value),
         Err(error) => json_err(error, StatusCode::BAD_REQUEST),
     }
