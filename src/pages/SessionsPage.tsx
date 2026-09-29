@@ -11,6 +11,7 @@ import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
+import { DialogAutoHeight } from "@/components/ui/dialog-auto-height";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import * as api from "@/lib/api";
@@ -470,7 +471,8 @@ export default function SessionsPage() {
       </div>
       <Dialog open={detailOpen} onOpenChange={(open) => { if (!open) closeDetail(); }}>
         <DialogContent showCloseButton={false} aria-describedby={undefined} onCloseAutoFocus={(event) => { event.preventDefault(); if (!detailOpen) openerRef.current?.focus({ preventScroll: true }); }} className="session-detail-modal flex flex-col gap-0 overflow-hidden p-0">
-          <DialogTitle className="sr-only">会话详情</DialogTitle>{detailPanel}
+          <DialogTitle className="sr-only">会话详情</DialogTitle>
+          <DialogAutoHeight>{detailPanel}</DialogAutoHeight>
         </DialogContent>
       </Dialog>
     </div>

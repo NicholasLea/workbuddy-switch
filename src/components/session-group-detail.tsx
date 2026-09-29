@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
 import { ArrowRight, Check, ChevronDown, ChevronLeft, Copy, Ellipsis, FileText, Folder, Info, Link2, Loader2, Plus, RefreshCw, TriangleAlert, Unlink, X } from "lucide-react";
 import { DemoAction } from "@/components/demo-action";
 import { CodeBuddyAiIdeMark, CodeBuddyCnIdeMark, VscodeExtAiMark, VscodeExtMark, WorkBuddyAiMark, WorkBuddyMark } from "@/components/product-marks";
@@ -49,20 +49,23 @@ type GraphLine = { path: string; tone: "default" | "common" | `branch-${number}`
 
 export function GroupDetailPanel(props: GroupDetailPanelProps) {
   const { detail } = props;
-  const panelRef = useRef<HTMLElement>(null);
-  const [wide, setWide] = useState(false);
   // 只存被点成员 id，确认框的成员由当前 detail 派生：浮层不会停留在过期数据上。
   const [unlinkTargetId, setUnlinkTargetId] = useState<string | null>(null);
   const [unlinkBusy, setUnlinkBusy] = useState(false);
   const unlinkTarget = detail?.members.find((member) => member.memberId === unlinkTargetId) ?? null;
   const graphRef = useRef<HTMLDivElement>(null);
   const [connections, setConnections] = useState<GraphLine[]>([]);
-  useEffect(() => {
+  useLayoutEffect(() => {
     const graph = graphRef.current;
     if (!graph) return;
     function measure() {
       if (!graph) return;
-      const base = graph.getBoundingClientRect();
+      const svg = graph.querySelector("svg");
+      const matrix = svg?.getScreenCTM();
+      if (!matrix) return;
+      // 屏幕坐标包含弹窗缩放；还原到 SVG 坐标，连线才不会被二次缩放。
+      const inverse = matrix.inverse();
+      const toLocal = (x: number, y: number) => new DOMPoint(x, y).matrixTransform(inverse);
       const hub = graph.querySelector<HTMLElement>("[data-session-hub]")?.getBoundingClientRect();
       if (!hub) return;
       const nodes = [...graph.querySelectorAll<HTMLElement>("[data-session-member]")];
@@ -72,12 +75,10 @@ export function GroupDetailPanel(props: GroupDetailPanelProps) {
       const next = nodes.map((node, index) => {
         const box = node.getBoundingClientRect();
         const left = index < leftCount;
-        const x = (left ? box.right : box.left) - base.left;
-        const y = box.top + box.height / 2 - base.top;
-        const hx = (left ? hub.left : hub.right) - base.left;
         const sideCount = left ? leftCount : nodes.length - leftCount;
         const sideIndex = left ? index : index - leftCount;
-        const hy = hub.top - base.top + hub.height * ((sideIndex + 1) / (sideCount + 1));
+        const { x, y } = toLocal(left ? box.right : box.left, box.top + box.height / 2);
+        const { x: hx, y: hy } = toLocal(left ? hub.left : hub.right, hub.top + hub.height * ((sideIndex + 1) / (sideCount + 1)));
         const mid = (x + hx) / 2;
         const dx = Math.sign(hx - x);
         const dy = Math.sign(hy - y);
@@ -96,13 +97,7 @@ export function GroupDetailPanel(props: GroupDetailPanelProps) {
     graph.querySelectorAll<HTMLElement>("[data-session-member], [data-session-hub]").forEach((node) => observer.observe(node));
     measure();
     return () => observer.disconnect();
-  }, [detail, wide]);
-  useEffect(() => {
-    if (!panelRef.current) return;
-    const observer = new ResizeObserver(([entry]) => setWide(entry.contentRect.width >= 760));
-    observer.observe(panelRef.current);
-    return () => observer.disconnect();
-  }, []);
+  }, [detail]);
 
   const active = detail?.members.filter((member) => member.linkState === "active") ?? [];
   const equal = detail?.summaryStatus === "latest" && active.length > 0;
@@ -176,7 +171,7 @@ export function GroupDetailPanel(props: GroupDetailPanelProps) {
     </Select>;
   }
 
-  return <section ref={panelRef} aria-label="会话组详情" data-relationship-layout={wide ? "hub-wide" : "hub-compact"} className="session-relationship flex h-full min-h-0 min-w-0 flex-col bg-card">
+  return <section aria-label="会话组详情" className="session-relationship flex h-full min-h-0 min-w-0 flex-col bg-card">
     <div className="flex shrink-0 items-center justify-between px-4 py-2.5">
       <span className="text-xs font-medium text-muted-foreground">会话详情</span>
       <Button variant="ghost" size={props.fullPage ? "sm" : "icon"} className={props.fullPage ? "h-7 text-xs" : "size-7"} aria-label={props.fullPage ? "返回会话" : "关闭详情"} onClick={props.onClose}>
@@ -188,10 +183,10 @@ export function GroupDetailPanel(props: GroupDetailPanelProps) {
         <p className="break-words">{props.error}</p><Button variant="outline" size="sm" className="h-7 text-xs" disabled={props.loading} onClick={props.onRetry}>重试</Button>
       </div>}
       {!detail && !props.error && <div aria-label="正在加载会话详情" aria-busy="true" className="space-y-3">
-        <Skeleton className="h-6 w-3/4" /><Skeleton className="h-5 w-28" /><Skeleton className="h-14 w-full" /><Skeleton className="h-5 w-32" /><Skeleton className="h-72 w-full" />
+        <Skeleton className="h-6 w-3/4" /><Skeleton className="h-5 w-28" /><Skeleton className="h-12 w-full" /><Skeleton className="h-5 w-32" /><Skeleton className="h-52 w-full" />
       </div>}
       {detail && <>
-        <h2 className={`break-words font-semibold leading-snug tracking-tight ${wide ? "text-xl" : "text-lg"}`}>{detail.title}</h2>
+        <h2 className="session-detail-title break-words text-lg font-semibold leading-snug tracking-tight">{detail.title}</h2>
         <div className="mt-2 flex flex-wrap items-center gap-x-2.5 gap-y-1">
           <Badge variant="success">{clientNames[props.client]}</Badge>
           <span className="flex min-w-0 items-center gap-1 text-[11px] text-muted-foreground"><Folder className="size-3 shrink-0" /><span className="truncate" title={detail.projectLabel}>{detail.projectLabel || "未标记项目"}</span></span>

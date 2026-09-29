@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useState } from "react";
 import { CircleAlert, ExternalLink, Loader2 } from "lucide-react";
 import { listen } from "@tauri-apps/api/event";
 import { toast } from "sonner";
@@ -13,6 +13,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { DialogAutoHeight } from "@/components/ui/dialog-auto-height";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { SessionSyncSection, type SessionLinksMeta } from "@/components/session-sync-section";
@@ -50,7 +51,7 @@ function tabCount(count: number) {
 /**
  * 会话列表区最小高度：加载态、空态与列表共用同一下沿。
  *
- * 弹窗垂直居中（`translate-y-[-50%]` 按自身高度算），内容高度一变弹窗就上下撑开；
+ * 弹窗垂直居中，内容高度一变弹窗就上下撑开；
  * 打开时先渲染加载态、会话数据到达后换成列表，两端高度差越大跳得越明显。
  * 与「关联会话」tab 的下沿取同一数值，两个 tab 打开时的高度表现保持一致。
  */
@@ -94,6 +95,9 @@ export function SwitchAccountDialog({ open, onOpenChange, account, onDone }: Pro
   /** 关联会话区块上报的状态：tab 徽标与常驻提示用。 */
   const [linksMeta, setLinksMeta] = useState<SessionLinksMeta | null>(null);
 
+  const variant = accountVariant(account);
+  const accountId = account?.id;
+
   // 监听后端切换进度：桌面端走 Tauri 事件，webui 走 HTTP 轮询
   useEffect(() => {
     if (api.isWebui()) {
@@ -115,27 +119,36 @@ export function SwitchAccountDialog({ open, onOpenChange, account, onDone }: Pro
     };
   }, []);
 
-  // 打开时按目标账号档位加载当前账号会话（会话列表按档位取自各自的登录态）
-  useEffect(() => {
-    if (open && account) {
-      setSelected(new Set());
-      setExpanded(new Set());
-      setError("");
-      setSyncSelections([]);
-      setSyncGroups([]);
-      setLinksMeta(null);
-      setTab("links");
-      setLoadingSessions(true);
-      api
-        .listSessions(accountVariant(account))
-        .then((res) => {
-          setSessions(res.sessions);
-          setCurrentUid(res.current);
-        })
-        .catch((e) => setError(api.asError(e)))
-        .finally(() => setLoadingSessions(false));
-    }
-  }, [open, account]);
+  // 立即打开弹框；首次绘制前重置旧内容，两个 tab 各自加载数据。
+  useLayoutEffect(() => {
+    if (!open || !accountId) return;
+    let cancelled = false;
+    setSelected(new Set());
+    setExpanded(new Set());
+    setPermCheck(null);
+    setError("");
+    setSessions([]);
+    setCurrentUid(null);
+    setSyncSelections([]);
+    setSyncGroups([]);
+    setLinksMeta(null);
+    setTab("links");
+    setLoadingSessions(true);
+    void api.listSessions(variant)
+      .then((res) => {
+        if (cancelled) return;
+        setSessions(res.sessions);
+        setCurrentUid(res.current);
+      })
+      .catch((e) => {
+        if (!cancelled) setError(api.asError(e));
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingSessions(false);
+      });
+    // 关闭时只取消回写，保留内容到退出动画结束。
+    return () => { cancelled = true; };
+  }, [open, accountId, variant]);
 
   function toggleSession(id: string) {
     setSelected((prev) => {
@@ -318,7 +331,7 @@ export function SwitchAccountDialog({ open, onOpenChange, account, onDone }: Pro
 
   // 出现「无权限」错误时，自动每 2s 轮询一次授权状态；用户拖入 app 授权成功后自动恢复
   useEffect(() => {
-    if (!error.includes("无权限")) return;
+    if (!open || !error.includes("无权限")) return;
     let cancelled = false;
     let timer: number | undefined;
     const check = async () => {
@@ -341,7 +354,7 @@ export function SwitchAccountDialog({ open, onOpenChange, account, onDone }: Pro
       cancelled = true;
       if (timer) window.clearTimeout(timer);
     };
-  }, [error]);
+  }, [error, open, variant]);
 
   const copyCount = selected.size;
   const syncCount = syncSelections.length;
@@ -433,8 +446,10 @@ export function SwitchAccountDialog({ open, onOpenChange, account, onDone }: Pro
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
         showCloseButton={!busy}
-        className="flex max-h-[min(90vh,calc(100vh-2rem))] min-w-0 flex-col overflow-hidden"
+        className="flex max-h-[min(90vh,calc(100vh-2rem))] min-w-0 flex-col gap-0 overflow-hidden p-0"
       >
+        <DialogAutoHeight>
+        <div className="flex max-h-[calc(min(90vh,100vh-2rem)-2px)] min-w-0 flex-col gap-4 p-6">
         <DialogHeader className="shrink-0">
           <DialogTitle>切换到「{account?.nickname || account?.email || account?.uid || "该账号"}」</DialogTitle>
           <DialogDescription>切换时将重启 {variantAppName(accountVariant(account))}。</DialogDescription>
@@ -569,6 +584,8 @@ export function SwitchAccountDialog({ open, onOpenChange, account, onDone }: Pro
             </Button>
           </div>
         </DialogFooter>
+        </div>
+        </DialogAutoHeight>
       </DialogContent>
     </Dialog>
   );

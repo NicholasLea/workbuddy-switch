@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { lazy, Suspense, useState } from "react";
 import { toast } from "sonner";
 import { BrowserRouter, HashRouter, Navigate, NavLink, Outlet, Route, Routes } from "react-router-dom";
 import { ArrowLeftRight, ArrowUp, Loader2, MessagesSquare, Play, Settings, Sparkles, User } from "lucide-react";
@@ -27,6 +27,8 @@ import { useRotateDeferredNotice } from "@/lib/use-rotate-deferred-notice";
 import { useUpdateState } from "@/lib/use-update-state";
 import { useWorkbuddyStatusRefresh } from "@/lib/use-workbuddy-status-refresh";
 import { useAccountsStore } from "@/stores/accounts";
+
+const DialogMotionLab = import.meta.env.DEV ? lazy(() => import("@/components/dev/dialog-motion-lab")) : null;
 
 /**
  * 悬浮窗面板：从 footer 向上滑出，开关与设置同屏。
@@ -350,6 +352,7 @@ export default function App() {
           </Route>
         </Routes>
         <Toaster />
+        {DialogMotionLab && <Suspense fallback={null}><DialogMotionLab /></Suspense>}
       </Router>
     </TooltipProvider>
   );
