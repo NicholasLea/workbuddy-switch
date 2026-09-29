@@ -9,6 +9,12 @@ fn main() {
     //
     // 本补丁的目标平台必然有 std（Windows/macOS/Linux 桌面 + 服务端），
     // 直接声明即可，不改变任何运行时行为。
+    //
+    // 先声明 check-cfg 再声明 cfg：autocfg 的自由函数 `emit()` 不会自动调用
+    // `emit_possibility()`（见其文档），缺了这一步，rustc 的 `unexpected_cfgs`
+    // 会对 `#[cfg(has_std)]` 告警；而本仓库 CI 的 clippy 带 `-D warnings`，
+    // 告警会直接升级为错误，把 `indexmap` 编译打断。
+    autocfg::emit_possibility("has_std");
     autocfg::emit("has_std");
     autocfg::rerun_path("build.rs");
 }
