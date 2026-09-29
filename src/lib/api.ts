@@ -156,6 +156,7 @@ const ROUTES: Record<string, Route> = {
   sync_session_group_unify: { method: "POST", path: "/api/session-groups/unify" },
   sync_session_group_safe_batch: { method: "POST", path: "/api/session-groups/sync-safe" },
   add_session_group_member: { method: "POST", path: "/api/session-groups/add" },
+  copy_linked_sessions: { method: "POST", path: "/api/session-groups/copy-linked" },
   unlink_session_group_member: { method: "POST", path: "/api/session-groups/unlink" },
   get_checkin_status: { method: "GET", path: "/api/checkin/status" },
   get_credit_expiry: { method: "POST", path: "/api/credits" },
@@ -527,12 +528,16 @@ export function listSessions(variant?: WbVariant): Promise<{
 }
 
 /** 指定账号名下的会话列表（会话管理页的源账号视角）；账号不存在时后端返回明确错误。 */
-export function listAccountSessions(accountId: string): Promise<{
-  sessions: Session[];
+export function listAccountSessions(accountId: string, client?: SessionGroupClient): Promise<{
+  /** 插件侧会话没有 `cwd`（只有 `workspaceHash`）：调用方补齐默认值后再交给会话树。 */
+  sessions: (Omit<Session, "cwd"> & { cwd?: string })[];
   current: string | null;
   variant?: WbVariant;
+  /** 插件侧：插件数据仓根目录（`null` = 未找到目录，与「该账号无会话」区分）。 */
+  dataRoot?: string | null;
+  sourceUid?: string;
 }> {
-  return call("list_account_sessions", { accountId });
+  return call("list_account_sessions", { accountId, ...(client ? { client } : {}) });
 }
 
 /** 把勾选会话复制到指定账号；返回 core 同形的复制报告（copied / alreadyLinked / errors）。 */
@@ -657,9 +662,22 @@ export function addSessionGroupMember(args: {
   variantScope?: WbVariant;
   /** 已获用户授权（确认框）时传 `true`：插件侧运行中允许关闭并重开 VS Code。 */
   restart?: boolean;
-}): Promise<{ status: "linked" | "alreadyLinked" | "copiedUnlinked" | "failed"; editorError?: string; restartedEditor?: boolean; [key: string]: unknown }> {
+}): Promise<{ status: "linked" | "alreadyLinked" | "copiedUnlinked" | "failed"; editorError?: string; restartedEditor?: boolean; /** 内容缺失 / 索引丢失而被跳过的会话。 */ skipped?: { id: string; error: string }[]; [key: string]: unknown }> {
   if (demoModeEnabled) return Promise.reject(new Error(DEMO_UNAVAILABLE_MESSAGE));
   return call("add_session_group_member", args as unknown as Record<string, unknown>);
+}
+
+/** 插件：把来源账号的勾选会话复制到目标账号并登记关联（无现成组则新建关联组）。 */
+export function copyLinkedSessions(args: {
+  client: SessionGroupClient;
+  sourceAccountId: string;
+  targetAccountId: string;
+  sessionIds: string[];
+  /** 已获用户授权（确认框）时传 `true`：运行中允许关闭并重开 VS Code。 */
+  restart?: boolean;
+}): Promise<{ status: "linked" | "alreadyLinked" | "copiedUnlinked" | "failed"; editorError?: string; restartedEditor?: boolean; [key: string]: unknown }> {
+  if (demoModeEnabled) return Promise.reject(new Error(DEMO_UNAVAILABLE_MESSAGE));
+  return call("copy_linked_sessions", args as unknown as Record<string, unknown>);
 }
 
 /**

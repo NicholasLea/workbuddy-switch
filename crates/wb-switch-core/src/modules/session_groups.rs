@@ -7,7 +7,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::modules::session::{SessionPaths, SyncSelection};
 use crate::modules::session_link::{
@@ -492,6 +492,35 @@ pub fn sync_safe_batch(
     settle_editor_window(guard, result)
 }
 
+/// 插件侧「复制 + 登记」共享段：复制给定会话到目标账号，并登记关联（无现成组则新建关联组）。
+///
+/// 供 `add_member`（往已有组加成员）与 `copy_linked_sessions`（从零复制并建组）共用；
+/// 只做复制与登记，不做运行门禁与收尾——生命周期窗口由调用方负责。
+fn plugin_copy_and_register(
+    spec: SessionStoreSpec,
+    root: &Path,
+    paths: &SessionPaths,
+    variant: WbVariant,
+    source_uid: &str,
+    target_uid: &str,
+    items: &[CopyItem],
+) -> Result<(Value, Vec<Value>), String> {
+    let backup_root = paths
+        .backup_root()
+        .join(spec.backup_kind)
+        .join(config::utc_iso());
+    let report =
+        vscode_session::copy_sessions_in(root, &backup_root, source_uid, target_uid, items)?;
+    let link_errors = vscode_session_sync::register_copied_sessions_in(
+        VSCODE_STORE,
+        root,
+        paths,
+        variant,
+        &report,
+    );
+    Ok((report, link_errors))
+}
+
 /// Copy one member into a compatible saved account and register it in the same namespace.
 pub fn add_member(
     client: SessionClient,
@@ -624,26 +653,32 @@ pub fn add_member(
                 workspace_hash,
                 conversation_id: source.session_id.clone(),
             };
-            let backup_root = paths
-                .backup_root()
-                .join(spec.backup_kind)
-                .join(config::utc_iso());
             // 校验（含来源内容）全部完成后，插件侧才打开编辑器生命周期窗口：为注定失败的请求关编辑器是无谓的。
             let guard = prepare_editor_window(client, restart, VSCODE_ADD_MEMBER_RUNNING_HINT)?;
             let result = (|| -> Result<Value, String> {
-                let report = match client {
+                let (report, link_errors) = match client {
                     SessionClient::CodebuddyIde => {
-                        codebuddy_ide_session::copy_codebuddy_ide_sessions_in(
+                        let backup_root = paths
+                            .backup_root()
+                            .join(spec.backup_kind)
+                            .join(config::utc_iso());
+                        let report = codebuddy_ide_session::copy_codebuddy_ide_sessions_in(
                             &root,
                             &backup_root,
                             &source.uid,
                             &target_uid,
                             &[item],
-                        )?
+                        )?;
+                        let link_errors = codebuddy_ide_session_sync::register_copied_sessions(
+                            &root, &paths, variant, &report,
+                        );
+                        (report, link_errors)
                     }
-                    SessionClient::VscodeExt => vscode_session::copy_sessions_in(
+                    SessionClient::VscodeExt => plugin_copy_and_register(
+                        spec,
                         &root,
-                        &backup_root,
+                        &paths,
+                        variant,
                         &source.uid,
                         &target_uid,
                         &[item],
@@ -659,21 +694,6 @@ pub fn add_member(
                         json!({ "status": "failed", "client": client.as_str(), "groupId": group_id, "report": report }),
                     );
                 }
-                let link_errors = match client {
-                    SessionClient::CodebuddyIde => {
-                        codebuddy_ide_session_sync::register_copied_sessions(
-                            &root, &paths, variant, &report,
-                        )
-                    }
-                    SessionClient::VscodeExt => vscode_session_sync::register_copied_sessions_in(
-                        VSCODE_STORE,
-                        &root,
-                        &paths,
-                        variant,
-                        &report,
-                    ),
-                    SessionClient::Workbuddy => unreachable!(),
-                };
                 if !link_errors.is_empty() {
                     return Ok(json!({
                         "status": "copiedUnlinked",
@@ -690,6 +710,128 @@ pub fn add_member(
             settle_editor_window(guard, result)
         }
     }
+}
+
+/// 插件：把来源账号的勾选会话复制到目标账号并登记关联（无现成组则新建关联组）。
+///
+/// 仅 `VscodeExt` 支持（其他客户端尚未接入该入口）；运行门禁与「确认后关闭重开」沿用插件侧
+/// 统一生命周期：全部校验通过后才关闭编辑器，失败路径尽力开回。
+pub fn copy_linked_sessions(
+    client: SessionClient,
+    source_account_id: &str,
+    target_account_id: &str,
+    session_ids: &[String],
+    restart: bool,
+) -> Result<Value, String> {
+    if client != SessionClient::VscodeExt {
+        return Err("当前客户端暂不支持新增关联会话".to_string());
+    }
+    if session_ids.is_empty() {
+        return Err("缺少要复制的会话".to_string());
+    }
+    let paths = client.store_paths();
+    let accounts = account::load_accounts_at(&account::accounts_file_in(&paths.store_root));
+    let source = accounts
+        .iter()
+        .find(|item| account::get_str(item, "id").as_deref() == Some(source_account_id))
+        .cloned()
+        .ok_or_else(|| "来源账号不存在".to_string())?;
+    let target = accounts
+        .iter()
+        .find(|item| account::get_str(item, "id").as_deref() == Some(target_account_id))
+        .cloned()
+        .ok_or_else(|| "目标账号不存在".to_string())?;
+    let source_uid = account::get_str(&source, "uid")
+        .map(|uid| uid.trim().to_string())
+        .filter(|uid| !uid.is_empty())
+        .ok_or_else(|| "来源账号缺少 uid".to_string())?;
+    let target_uid = account::get_str(&target, "uid")
+        .map(|uid| uid.trim().to_string())
+        .filter(|uid| !uid.is_empty())
+        .ok_or_else(|| "目标账号缺少 uid".to_string())?;
+    if !vscode_session::is_safe_uid(&target_uid) {
+        return Err("目标账号 uid 非法，拒绝写入".to_string());
+    }
+    if source_uid == target_uid {
+        return Err("来源账号与目标账号相同，无需复制会话".to_string());
+    }
+    let root = client
+        .data_root()
+        .ok_or_else(|| "未找到 VS Code CodeBuddy 插件数据目录".to_string())?;
+    let spec = client
+        .store_spec()
+        .ok_or_else(|| "插件数据仓不可用".to_string())?;
+    let variant = account::variant_of(&target);
+    // 逐条校验来源内容：无内容 / 索引缺失的跳过并如实报告；全部无效才拒绝
+    // （不为注定失败的请求关编辑器）。
+    let mut items = Vec::with_capacity(session_ids.len());
+    let mut skipped: Vec<Value> = Vec::new();
+    for session_id in session_ids {
+        match vscode_session_sync::session_location_and_content(
+            spec,
+            &root,
+            &source_uid,
+            session_id,
+        ) {
+            Some((workspace_hash, _, ContentState::Ready(_))) => items.push(CopyItem {
+                workspace_hash,
+                conversation_id: session_id.clone(),
+            }),
+            Some(_) => skipped.push(json!({
+                "id": session_id,
+                "error": "来源会话内容缺失或无法确认",
+            })),
+            None => skipped.push(json!({
+                "id": session_id,
+                "error": "来源会话索引已不存在",
+            })),
+        }
+    }
+    if items.is_empty() {
+        return Err("勾选的会话都没有可复制的内容".to_string());
+    }
+    let _operation_lock = session_link::try_acquire_client_ops_lock(&paths)?;
+    let guard = prepare_editor_window(client, restart, VSCODE_ADD_MEMBER_RUNNING_HINT)?;
+    let result = (|| -> Result<Value, String> {
+        let (report, link_errors) = plugin_copy_and_register(
+            spec,
+            &root,
+            &paths,
+            variant,
+            &source_uid,
+            &target_uid,
+            &items,
+        )?;
+        let copied = report
+            .get("copied")
+            .and_then(Value::as_array)
+            .map_or(0, Vec::len);
+        if copied == 0 {
+            return Ok(json!({
+                "status": "failed",
+                "client": client.as_str(),
+                "report": report,
+                "skipped": skipped,
+            }));
+        }
+        if !link_errors.is_empty() {
+            return Ok(json!({
+                "status": "copiedUnlinked",
+                "client": client.as_str(),
+                "report": report,
+                "linkErrors": link_errors,
+                "skipped": skipped,
+            }));
+        }
+        Ok(json!({
+            "status": "linked",
+            "client": client.as_str(),
+            "report": report,
+            "linkErrors": [],
+            "skipped": skipped,
+        }))
+    })();
+    settle_editor_window(guard, result)
 }
 
 /// Remove one member from a group, keeping the account's session content untouched.
@@ -1820,6 +1962,36 @@ mod tests {
             settle_editor_window(None, Err("原错误".to_string())).unwrap_err(),
             "原错误"
         );
+    }
+
+    #[test]
+    fn copy_linked_sessions_rejects_invalid_requests_before_touching_editor() {
+        // 非插件客户端：直接拒绝（该入口尚未接入）。
+        let error = copy_linked_sessions(
+            SessionClient::Workbuddy,
+            "source",
+            "target",
+            &["conv".to_string()],
+            false,
+        )
+        .unwrap_err();
+        assert!(error.contains("暂不支持新增关联会话"), "{error}");
+
+        // 空勾选：直接拒绝。
+        let error = copy_linked_sessions(SessionClient::VscodeExt, "source", "target", &[], false)
+            .unwrap_err();
+        assert!(error.contains("缺少要复制的会话"), "{error}");
+
+        // 账号不存在：直接拒绝（不会走到编辑器生命周期窗口）。
+        let error = copy_linked_sessions(
+            SessionClient::VscodeExt,
+            "no-such-source",
+            "no-such-target",
+            &["conv".to_string()],
+            true,
+        )
+        .unwrap_err();
+        assert!(error.contains("来源账号不存在"), "{error}");
     }
 
     #[test]

@@ -161,6 +161,10 @@ pub fn router() -> Router {
             "/api/session-groups/unlink",
             post(api_unlink_session_group_member),
         )
+        .route(
+            "/api/session-groups/copy-linked",
+            post(api_copy_linked_sessions),
+        )
         .route("/api/checkin/status", get(api_checkin_status))
         .route("/api/credits", post(api_credits))
         .route("/api/credits/stats", get(api_credit_statistics))
@@ -873,10 +877,32 @@ async fn api_sessions(RawQuery(query): RawQuery) -> Response {
 /// 返回 400；账号缺 uid 时返回空列表 + `current: null`（与现有容错一致）。
 async fn api_account_sessions(RawQuery(query): RawQuery) -> Response {
     let account_id = query_param(query.as_deref(), "accountId").unwrap_or_default();
+    let client = query_param(query.as_deref(), "client").unwrap_or_else(|| "workbuddy".to_string());
     let Some(account) = account::find_account(&account_id) else {
         return json_err("账号不存在".to_string(), StatusCode::BAD_REQUEST);
     };
-    json_ok(session::list_sessions_for_account(&account))
+    let client = match session_groups::SessionClient::parse(&client) {
+        Ok(client) => client,
+        Err(error) => return json_err(error, StatusCode::BAD_REQUEST),
+    };
+    match client {
+        session_groups::SessionClient::VscodeExt => {
+            let Some(uid) = account::get_str(&account, "uid")
+                .map(|uid| uid.trim().to_string())
+                .filter(|uid| !uid.is_empty())
+            else {
+                return json_err("账号缺少 uid".to_string(), StatusCode::BAD_REQUEST);
+            };
+            json_ok(vscode_session::list_vscode_sessions(&uid))
+        }
+        session_groups::SessionClient::Workbuddy => {
+            json_ok(session::list_sessions_for_account(&account))
+        }
+        session_groups::SessionClient::CodebuddyIde => json_err(
+            "当前客户端暂不支持列出账号会话".to_string(),
+            StatusCode::BAD_REQUEST,
+        ),
+    }
 }
 
 async fn api_copy_sessions(Json(body): Json<Value>) -> Response {
@@ -1199,6 +1225,46 @@ async fn api_add_session_group_member(Json(body): Json<Value>) -> Response {
         .and_then(Value::as_bool)
         .unwrap_or(false);
     match session_groups::add_member(client, scope, args.0, args.1, args.2, restart) {
+        Ok(value) => json_ok(value),
+        Err(error) => json_err(error, StatusCode::BAD_REQUEST),
+    }
+}
+
+async fn api_copy_linked_sessions(Json(body): Json<Value>) -> Response {
+    let (client, _scope) = match session_group_request(&body) {
+        Ok(value) => value,
+        Err(error) => return json_err(error, StatusCode::BAD_REQUEST),
+    };
+    let source_account_id = body
+        .get("sourceAccountId")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let target_account_id = body
+        .get("targetAccountId")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let session_ids: Vec<String> = body
+        .get("sessionIds")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    let restart = body
+        .get("restart")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    match session_groups::copy_linked_sessions(
+        client,
+        source_account_id,
+        target_account_id,
+        &session_ids,
+        restart,
+    ) {
         Ok(value) => json_ok(value),
         Err(error) => json_err(error, StatusCode::BAD_REQUEST),
     }

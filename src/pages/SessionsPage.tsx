@@ -480,7 +480,7 @@ export default function SessionsPage() {
             </div>
             <div className="flex max-w-full flex-wrap items-center justify-end gap-2">
               <Button variant="outline" size="sm" className="shrink-0" onClick={() => void (selectedGroupId ? reloadSelectedGroup() : reloadGroups())} disabled={loading || detailLoading}><RefreshCw className={loading ? "animate-spin" : undefined} />刷新</Button>
-              <AddLinkedSessionDialog client={client} disabled={loading} onDone={() => void (selectedGroupId ? reloadSelectedGroup() : reloadGroups())} />
+              <AddLinkedSessionDialog client={client} disabled={loading} onDone={() => void (selectedGroupId ? reloadSelectedGroup() : reloadGroups())} requestRestartConfirm={(actionLabel, run) => setRestartPrompt({ actionLabel, run })} />
             </div>
           </div>
           <Tabs value={client} onValueChange={changeClient} className="mt-4">
@@ -564,7 +564,13 @@ const LINKED_TREE_MIN_H = "min-h-[min(10rem,30vh)]";
  * 本次仅 WorkBuddy 客户端开放；其他客户端入口禁用（其复制 / 关联能力后续再补）。执行沿用
  * `copySessionsCross`：来源会话已属于某关联组则加入该组，未关联则新建关联组。
  */
-function AddLinkedSessionDialog({ client, disabled, onDone }: { client: SessionGroupClient; disabled: boolean; onDone: () => void }) {
+function AddLinkedSessionDialog({ client, disabled, onDone, requestRestartConfirm }: {
+  client: SessionGroupClient;
+  disabled: boolean;
+  onDone: () => void;
+  /** 插件侧运行中：请求页面统一的「关闭并重开」确认框；用户确认后执行 `run`。 */
+  requestRestartConfirm: (actionLabel: string, run: () => Promise<void>) => void;
+}) {
   const accounts = useAccountsStore((state) => state.accounts);
   const [open, setOpen] = useState(false);
   const [sourceAccountId, setSourceAccountId] = useState("");
@@ -572,6 +578,8 @@ function AddLinkedSessionDialog({ client, disabled, onDone }: { client: SessionG
   const [sessions, setSessions] = useState<Session[]>([]);
   const [sessionsLoading, setSessionsLoading] = useState(false);
   const [sessionsError, setSessionsError] = useState("");
+  /** 插件侧数据目录：`null` = 未找到（与「该账号无会话」区分）；`undefined` = 返回未携带该字段。 */
+  const [dataRoot, setDataRoot] = useState<string | null | undefined>(undefined);
   /** 勾选 / 展开集合由调用方持有（会话树契约），执行时一次提交全部勾选。 */
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
@@ -584,17 +592,21 @@ function AddLinkedSessionDialog({ client, disabled, onDone }: { client: SessionG
   const sourceAccount = workbuddyAccounts.find((account) => account.id === sourceAccountId) ?? null;
   const targetAccount = workbuddyAccounts.find((account) => account.id === targetAccountId) ?? null;
   const targetOptions = workbuddyAccounts.filter((account) => account.id !== sourceAccountId);
-  const supported = client === "workbuddy";
+  const supported = client === "workbuddy" || client === "vscodeExt";
   const unsupportedTitle = "当前客户端暂不支持新增关联会话";
+  /** 弹窗文案用：来源账号的客户端称呼。 */
+  const clientAccountLabel = client === "workbuddy" ? "WorkBuddy 账号" : "CodeBuddy 插件账号";
 
   async function loadSessions(account: AccountMeta) {
     const id = ++requestId.current;
     setSessionsLoading(true);
     setSessionsError("");
     try {
-      const result = await api.listAccountSessions(account.id);
+      const result = await api.listAccountSessions(account.id, client);
       if (requestId.current !== id) return;
-      setSessions(result.sessions);
+      // 插件会话没有工作目录概念（只有 workspaceHash）：补空 cwd，交给会话树平铺展示。
+      setSessions(result.sessions.map((session) => ({ ...session, cwd: session.cwd ?? "" })));
+      setDataRoot(result.dataRoot);
     } catch (error) {
       if (requestId.current !== id) return;
       setSessions([]);
@@ -668,7 +680,71 @@ function AddLinkedSessionDialog({ client, disabled, onDone }: { client: SessionG
       return next;
     });
   }
+  /** 插件侧运行探测：详情加载时的状态可能已过期，点击时实时查一次（失败按未运行处理）。 */
+  async function pluginRunningNow(): Promise<boolean> {
+    try {
+      return (await api.getVscodeExtStatus()).running === true;
+    } catch {
+      return false;
+    }
+  }
   async function copyAndLink() {
+    if (!sourceAccount || !targetAccountId || sourceAccount.id === targetAccountId || selected.size === 0 || busy) return;
+    if (client === "vscodeExt") {
+      // 运行中的写入会被 VS Code 覆盖：先走页面统一的确认框授权「关闭并重开」。
+      if (await pluginRunningNow()) {
+        requestRestartConfirm("关闭并复制", () => copyAndLinkPlugin(true));
+        return;
+      }
+      await copyAndLinkPlugin(false);
+      return;
+    }
+    await copyAndLinkWorkbuddy();
+  }
+  async function copyAndLinkPlugin(restart: boolean) {
+    if (!sourceAccount || !targetAccountId || sourceAccount.id === targetAccountId || selected.size === 0 || busy) return;
+    const copyId = ++copyRequestId.current;
+    setBusy(true);
+    try {
+      const report = await api.copyLinkedSessions({
+        client: "vscodeExt",
+        sourceAccountId: sourceAccount.id,
+        targetAccountId,
+        sessionIds: [...selected],
+        restart,
+      });
+      const targetName = targetAccount ? accountLabel(targetAccount) : "目标账号";
+      const status = String(report.status);
+      const skipped = Array.isArray(report.skipped) ? report.skipped : [];
+      const copiedCount = (report.report as { copied?: unknown[] } | undefined)?.copied?.length ?? 0;
+      if (status === "linked") {
+        toast.success(`已复制 ${copiedCount} 个会话到「${targetName}」并建立关联`, report.restartedEditor ? { description: "已重新打开 VS Code" } : undefined);
+      } else if (status === "copiedUnlinked") {
+        toast.warning("会话已复制，但没有建立关联", { description: JSON.stringify(report.linkErrors ?? []) });
+      } else {
+        toast.error("复制并关联失败");
+      }
+      if (skipped.length > 0) toast.info(`有 ${skipped.length} 个会话因内容缺失被跳过`, { description: skipped.map((item) => item.error).join("；") });
+      if (report.editorError) toast.warning("VS Code 未能自动重新打开", { description: report.editorError });
+      // 关窗换代后，结果已经提示过；不要把新打开的弹窗关掉，也不要清掉新一次执行的 busy。
+      if (copyRequestId.current !== copyId) {
+        if (status === "linked") onDone();
+        return;
+      }
+      if (status === "linked") {
+        requestId.current += 1;
+        setSessionsLoading(false);
+        setOpen(false);
+        onDone();
+      }
+    } catch (error) {
+      // 换代后也要报失败：请求已经发出，静默会让用户以为没执行。
+      toast.error("复制并关联失败", { description: api.asError(error) });
+    } finally {
+      if (copyRequestId.current === copyId) setBusy(false);
+    }
+  }
+  async function copyAndLinkWorkbuddy() {
     if (!sourceAccount || !targetAccountId || sourceAccount.id === targetAccountId || selected.size === 0 || busy) return;
     const copyId = ++copyRequestId.current;
     setBusy(true);
@@ -737,10 +813,10 @@ function AddLinkedSessionDialog({ client, disabled, onDone }: { client: SessionG
       <div className="flex min-h-0 flex-col gap-3 overflow-x-hidden overflow-y-auto">
         <div className="min-w-0 space-y-1.5"><p className="text-xs font-medium">来源账号</p>
           <Select value={sourceAccountId} onValueChange={changeSource} disabled={busy}>
-            <SelectTrigger size="sm" className="w-full min-w-0 bg-background text-xs" aria-label="选择来源账号"><SelectValue placeholder="选择 WorkBuddy 账号" /></SelectTrigger>
+            <SelectTrigger size="sm" className="w-full min-w-0 bg-background text-xs" aria-label="选择来源账号"><SelectValue placeholder={`选择${clientAccountLabel}`} /></SelectTrigger>
             <SelectContent>{workbuddyAccounts.map((account) => <SelectItem key={account.id} value={account.id} className="text-xs">{accountLabel(account)} · {variantLabel(accountVariant(account))}</SelectItem>)}</SelectContent>
           </Select>
-          {workbuddyAccounts.length === 0 && <p className="text-xs text-muted-foreground">账号库里还没有 WorkBuddy 账号。</p>}
+          {workbuddyAccounts.length === 0 && <p className="text-xs text-muted-foreground">账号库里还没有{clientAccountLabel}。</p>}
         </div>
         <div className="min-w-0 space-y-1.5"><p className="text-xs font-medium">来源会话</p>
           {!sourceAccountId
@@ -750,7 +826,7 @@ function AddLinkedSessionDialog({ client, disabled, onDone }: { client: SessionG
               : sessionsError
                 ? <div role="alert" className={`flex flex-col items-center justify-center gap-2 px-3 text-center ${LINKED_TREE_MIN_H}`}><p className="text-sm text-destructive">{sessionsError}</p><Button variant="outline" size="sm" onClick={() => { if (sourceAccount) void loadSessions(sourceAccount); }}>重试</Button></div>
                 : sessions.length === 0
-                  ? <p className={`flex items-center justify-center px-3 text-center text-sm text-muted-foreground ${LINKED_TREE_MIN_H}`}>该账号没有可复制的会话。</p>
+                  ? <p className={`flex items-center justify-center px-3 text-center text-sm text-muted-foreground ${LINKED_TREE_MIN_H}`}>{client === "vscodeExt" && dataRoot === null ? "未找到插件数据目录：请先打开 VS Code 并登录 CodeBuddy 插件。" : "该账号没有可复制的会话。"}</p>
                   : <SessionTreeList
                     sessions={sessions}
                     selected={selected}

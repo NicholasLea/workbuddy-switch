@@ -604,13 +604,29 @@ pub fn list_sessions(variant: Option<String>) -> Value {
 }
 
 /// GET /api/sessions/account —— 指定账号名下的会话列表（会话管理页源账号视角）。
+///
+/// `client` 缺省 workbuddy（读 WorkBuddy 数据库）；`vscodeExt` 改读插件数据仓。
 #[tauri::command(rename_all = "camelCase")]
-pub fn list_account_sessions(account_id: String) -> Result<Value, String> {
+pub fn list_account_sessions(account_id: String, client: Option<String>) -> Result<Value, String> {
     if account_id.trim().is_empty() {
         return Err("缺少 accountId".to_string());
     }
     let account = account::find_account(&account_id).ok_or("账号不存在")?;
-    Ok(session::list_sessions_for_account(&account))
+    match session_groups::SessionClient::parse(client.as_deref().unwrap_or("workbuddy"))? {
+        session_groups::SessionClient::VscodeExt => {
+            let uid = account::get_str(&account, "uid")
+                .map(|uid| uid.trim().to_string())
+                .filter(|uid| !uid.is_empty())
+                .ok_or("账号缺少 uid")?;
+            Ok(vscode_session::list_vscode_sessions(&uid))
+        }
+        session_groups::SessionClient::Workbuddy => {
+            Ok(session::list_sessions_for_account(&account))
+        }
+        session_groups::SessionClient::CodebuddyIde => {
+            Err("当前客户端暂不支持列出账号会话".to_string())
+        }
+    }
 }
 
 /// POST /api/sessions/copy —— 把勾选会话复制到指定账号（路径 B）。
@@ -879,6 +895,32 @@ pub async fn add_session_group_member(
             &group_id,
             &source_member_id,
             &target_account_id,
+            restart,
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+/// 插件：把来源账号的勾选会话复制到目标账号并登记关联（无现成组则新建关联组）。
+///
+/// `restart` 缺省 false：VS Code 运行中需用户确认（确认框授权）后传 true，由后端关闭并重开。
+#[tauri::command(rename_all = "camelCase")]
+pub async fn copy_linked_sessions(
+    client: String,
+    source_account_id: String,
+    target_account_id: String,
+    session_ids: Vec<String>,
+    restart: Option<bool>,
+) -> Result<Value, String> {
+    let client = session_groups::SessionClient::parse(&client)?;
+    let restart = restart.unwrap_or(false);
+    tauri::async_runtime::spawn_blocking(move || {
+        session_groups::copy_linked_sessions(
+            client,
+            &source_account_id,
+            &target_account_id,
+            &session_ids,
             restart,
         )
     })
