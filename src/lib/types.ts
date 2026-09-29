@@ -133,6 +133,9 @@ export interface LinkedCopyResult {
 export interface SessionCopyReport {
   sourceUid?: string;
   targetUid?: string;
+  /** 跨档复制时带两侧档位；同档复制不出现这两个字段。 */
+  sourceVariant?: WbVariant;
+  targetVariant?: WbVariant;
   copied?: CopyResult[];
   alreadyLinked?: LinkedCopyResult[];
   errors?: { id: string; error: string }[];
@@ -164,7 +167,7 @@ export interface SessionRecoveryReport {
 export type SessionSyncVerdict = "identical" | "fastForward" | "ahead" | "diverge" | "unknown";
 
 /** 同步写入模式：只有后端 `availableModes` 里给出的模式才允许提交。 */
-export type SessionSyncMode = "fastForward" | "overwrite";
+export type SessionSyncMode = "fastForward" | "overwrite" | "unifyOverwrite";
 
 /** 关联组成员（不含正文）：`state` 为 active 时才算该账号的有效成员。 */
 export interface SessionLinkMember {
@@ -205,6 +208,9 @@ export interface SessionLinksPreview {
   storeError?: string;
   sourceUid: string;
   targetUid: string;
+  /** 跨档预览时带两侧档位；同档预览不出现这两个字段。 */
+  sourceVariant?: WbVariant;
+  targetVariant?: WbVariant;
   groups: SessionLinkPreviewGroup[];
 }
 
@@ -252,6 +258,121 @@ export interface SessionSyncReport {
   needsRecovery?: boolean;
   /** 临时备份残留（待清理/待恢复）；无异常时为空数组。 */
   temporaryFiles?: TemporaryFileInfo[];
+}
+
+// ---------------------------------------------------------------------------
+// Client-scoped session group directory
+// ---------------------------------------------------------------------------
+
+export type SessionGroupClient = "workbuddy" | "codebuddyIde" | "vscodeExt";
+export type SessionGroupStatus = "latest" | "behind" | "diverge" | "missing" | "unknown";
+export type SessionMemberVersionStatus = SessionGroupStatus | "stale" | "superseded";
+
+export interface SessionGroupSummary {
+  key: string;
+  client: SessionGroupClient;
+  variantScope: WbVariant | null;
+  groupId: string;
+  groupVariant: WbVariant;
+  title: string;
+  projectLabel: string;
+  latestActivityAt: number;
+  memberCount: number;
+  activeMemberCount: number;
+  accountNames: string[];
+  summaryStatus: SessionGroupStatus;
+  summaryText: string;
+  safeSourceMemberId: string | null;
+  hasSafeSource: boolean;
+}
+
+export interface SessionGroupMemberDetail {
+  memberId: string;
+  accountId: string | null;
+  uid: string;
+  sessionId: string;
+  accountName: string;
+  variant: WbVariant;
+  linkState: "active" | "stale" | "superseded";
+  versionStatus: SessionMemberVersionStatus;
+  title: string;
+  projectLabel: string;
+  updatedAt: number;
+  recordCount: number | null;
+  contentPreview?: { speaker: string; text: string }[];
+  contentState: "ready" | "missing" | "unavailable";
+  reason: string;
+  canBeSource: boolean;
+}
+
+export interface SessionGroupList {
+  client: SessionGroupClient;
+  variantScope: WbVariant | null;
+  storeStatus: "missing" | "ready" | "unavailable";
+  storeError?: string;
+  groups: SessionGroupSummary[];
+}
+
+export interface SessionGroupDetail extends SessionGroupSummary {
+  members: SessionGroupMemberDetail[];
+  addTargets: AccountMeta[];
+  divergence?: {
+    commonMemberIds: string[];
+    branches: string[][];
+  };
+}
+
+export interface SessionGroupPairPreview {
+  client: SessionGroupClient;
+  variantScope: WbVariant | null;
+  groupId: string;
+  sourceMemberId: string;
+  targetMemberId: string;
+  verdict: SessionSyncVerdict;
+  availableModes: SessionSyncMode[];
+  previewToken: string | null;
+  reason: string;
+  recordCount: { source: number; target: number; baseline: number | null } | null;
+  extraTargetCount: number;
+}
+
+/** One read-only plan for making every active copy match a chosen group member. */
+export interface SessionGroupUnifyPlan {
+  client: SessionGroupClient;
+  groupId: string;
+  sourceMemberId: string;
+  sourceName: string;
+  targets: {
+    memberId: string;
+    accountName: string;
+    preview: SessionGroupPairPreview | null;
+    error: string | null;
+  }[];
+}
+
+/** A client-reported current login, matched by stable UID or saved account ID. */
+export interface SessionGroupCurrentAccount {
+  variant?: WbVariant;
+  uid?: string | null;
+  accountId?: string | null;
+  running?: boolean;
+}
+
+export interface SessionGroupActionReport {
+  client: SessionGroupClient;
+  groupId: string;
+  sourceMemberId?: string;
+  targetMemberId?: string;
+  synced: SessionSyncResultItem[];
+  skipped: SessionSyncSkippedItem[];
+  errors: { groupId?: string; error: string }[];
+  needsRecovery?: boolean;
+  temporaryFiles?: TemporaryFileInfo[];
+  restartedVariants?: WbVariant[];
+  /** 插件侧：本次由 wb-switch 关闭并成功重开了 VS Code。 */
+  restartedEditor?: boolean;
+  /** 插件侧：写入已完成但 VS Code 未能自动重新打开（无 `errors` 数组的入口用它兜底）。 */
+  editorError?: string;
 }
 
 /**
@@ -888,4 +1009,3 @@ export interface VscodeSessionList {
    */
   dataRoot?: string | null;
 }
-
