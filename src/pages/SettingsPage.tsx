@@ -32,6 +32,7 @@ import { Switch } from "@/components/ui/switch";
 import { TimePicker } from "@/components/ui/time-picker";
 import * as api from "@/lib/api";
 import { canPersistErrorLog } from "@/lib/error-report";
+import { setSessionsNavEnabled, useSessionsNavEnabled } from "@/lib/nav-prefs";
 import { getThemePreference, setThemePreference, type ThemePreference } from "@/lib/theme";
 import { SUPPORTED_TOOLS, setToolEnabled, useSupportedTools, type ToolId } from "@/lib/supported-tools";
 import type {
@@ -1802,6 +1803,7 @@ function ErrorLogCard() {
 
 function AppearanceCard() {
   const [theme, setTheme] = useState<ThemePreference>(getThemePreference);
+  const sessionsNavEnabled = useSessionsNavEnabled();
 
   function onThemeChange(value: string) {
     if (value !== "system" && value !== "light" && value !== "dark") return;
@@ -1816,7 +1818,6 @@ function AppearanceCard() {
     >
       <CardContent className="space-y-0 p-0">
         <SettingsFieldRow
-          className="border-b-0"
           label="主题"
           description="选择浅色、深色，或跟随系统外观自动切换"
           htmlFor="appearance-theme"
@@ -1831,6 +1832,19 @@ function AppearanceCard() {
               <SelectItem value="dark">深色</SelectItem>
             </SelectContent>
           </Select>
+        </SettingsFieldRow>
+        <SettingsFieldRow
+          className="border-b-0"
+          label="显示关联会话菜单"
+          description="关闭后左侧导航不再显示「关联会话」入口，会话数据与关联关系不受影响"
+          htmlFor="appearance-sessions-nav"
+        >
+          <Switch
+            id="appearance-sessions-nav"
+            checked={sessionsNavEnabled}
+            onCheckedChange={(on) => setSessionsNavEnabled(on)}
+            aria-label="显示关联会话菜单"
+          />
         </SettingsFieldRow>
       </CardContent>
     </SettingsGroup>

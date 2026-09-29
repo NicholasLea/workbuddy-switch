@@ -21,6 +21,7 @@ import { Switch } from "@/components/ui/switch";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import companionTrayIcon from "@/assets/agent-companion-tray.png";
 import { DEMO_UNAVAILABLE_MESSAGE, demoModeEnabled, pagesDemoHostingEnabled } from "@/lib/demo-mode";
+import { useSessionsNavEnabled } from "@/lib/nav-prefs";
 import { changeCompanionEnabled, useCompanionEnabled } from "@/lib/use-companion-enabled";
 import { useCreditAutoRefresh } from "@/lib/use-credit-auto-refresh";
 import { useRotateDeferredNotice } from "@/lib/use-rotate-deferred-notice";
@@ -221,6 +222,7 @@ function Layout() {
   const running = useAccountsStore((s) => s.status?.running);
   const hasUnifiedTitleBar =
     api.isDesktop() && typeof navigator !== "undefined" && navigator.userAgent.includes("Macintosh");
+  const sessionsNavEnabled = useSessionsNavEnabled();
   useCreditAutoRefresh();
   useWorkbuddyStatusRefresh();
   useRotateDeferredNotice();
@@ -275,20 +277,22 @@ function Layout() {
             <User className="size-4" />
             账号管理
           </NavLink>
-          <NavLink
-            to="/sessions"
-            className={({ isActive }) =>
-              cn(
-                "flex items-center gap-2.5 rounded-lg px-3 py-2.5 text-sm outline-none transition-colors focus-visible:ring-2 focus-visible:ring-sidebar-ring/50",
-                isActive
-                  ? "bg-foreground/[0.06] font-medium text-foreground"
-                  : "text-muted-foreground hover:bg-foreground/[0.04] hover:text-foreground",
-              )
-            }
-          >
-            <Link2 className="size-4" />
-            关联会话
-          </NavLink>
+          {sessionsNavEnabled && (
+            <NavLink
+              to="/sessions"
+              className={({ isActive }) =>
+                cn(
+                  "flex items-center gap-2.5 rounded-lg px-3 py-2.5 text-sm outline-none transition-colors focus-visible:ring-2 focus-visible:ring-sidebar-ring/50",
+                  isActive
+                    ? "bg-foreground/[0.06] font-medium text-foreground"
+                    : "text-muted-foreground hover:bg-foreground/[0.04] hover:text-foreground",
+                )
+              }
+            >
+              <Link2 className="size-4" />
+              关联会话
+            </NavLink>
+          )}
           <NavLink to="/token-stats" className={({ isActive }) => cn("flex items-center gap-2.5 rounded-lg px-3 py-2.5 text-sm outline-none transition-colors", isActive ? "bg-foreground/[0.06] font-medium text-foreground" : "text-muted-foreground hover:bg-foreground/[0.04] hover:text-foreground")}><MessagesSquare className="size-4" />Token 统计</NavLink>
           <NavLink
             to="/credit-stats"
