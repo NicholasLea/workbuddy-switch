@@ -233,6 +233,7 @@ pub fn run() {
             commands::sync_session_group_safe_batch,
             commands::add_session_group_member,
             commands::copy_linked_sessions,
+            commands::vscode_restart_precheck,
             commands::unlink_session_group_member,
             commands::open_permission_settings,
             commands::check_auth_permission,

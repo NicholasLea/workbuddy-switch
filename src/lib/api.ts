@@ -157,6 +157,7 @@ const ROUTES: Record<string, Route> = {
   sync_session_group_safe_batch: { method: "POST", path: "/api/session-groups/sync-safe" },
   add_session_group_member: { method: "POST", path: "/api/session-groups/add" },
   copy_linked_sessions: { method: "POST", path: "/api/session-groups/copy-linked" },
+  vscode_restart_precheck: { method: "POST", path: "/api/vscode-ext/restart-precheck" },
   unlink_session_group_member: { method: "POST", path: "/api/session-groups/unlink" },
   get_checkin_status: { method: "GET", path: "/api/checkin/status" },
   get_credit_expiry: { method: "POST", path: "/api/credits" },
@@ -678,6 +679,11 @@ export function copyLinkedSessions(args: {
 }): Promise<{ status: "linked" | "alreadyLinked" | "copiedUnlinked" | "failed"; editorError?: string; restartedEditor?: boolean; [key: string]: unknown }> {
   if (demoModeEnabled) return Promise.reject(new Error(DEMO_UNAVAILABLE_MESSAGE));
   return call("copy_linked_sessions", args as unknown as Record<string, unknown>);
+}
+
+/** 预检：当前是否需要关闭 VS Code（运行中 且 目标账号含当前登录账号）；供前端决定是否先弹确认框。 */
+export function vscodeRestartPrecheck(targetAccountIds: string[]): Promise<{ required: boolean; running: boolean }> {
+  return call("vscode_restart_precheck", { targetAccountIds });
 }
 
 /**

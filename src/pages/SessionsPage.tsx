@@ -80,13 +80,13 @@ export default function SessionsPage() {
     setDetailOpen(true);
   }
   /**
-   * 点击时实时探测 VS Code 是否在运行（详情加载时读到的状态可能已过期）。
-   * 探测失败按「未运行」处理：后端在 `restart=false` 时仍有最终判定，不会误关编辑器。
+   * 预检：本次写入目标是否包含当前登录账号（只有涉及才需要「关闭并重开」确认框）。
+   * 探测失败按「不需要」处理：后端在各写入口仍有实时判定兜底，不会误关编辑器。
    */
-  async function vscodeRunningNow(): Promise<boolean> {
+  async function needsEditorRestart(targetAccountIds: string[]): Promise<boolean> {
     if (client !== "vscodeExt") return false;
     try {
-      return (await api.getVscodeExtStatus()).running === true;
+      return (await api.vscodeRestartPrecheck(targetAccountIds)).required === true;
     } catch {
       return false;
     }
@@ -277,11 +277,15 @@ export default function SessionsPage() {
     setActionBusy(true);
     try {
       if ((client === "workbuddy" || client === "vscodeExt") && actions.length > 0) {
+        // 插件侧：只有写入目标含当前登录账号才需要关闭/重开（统一确认框已提前告知）。
+        const targetAccountIds = actions
+          .map(({ target }) => detail?.members.find((member) => member.memberId === target.memberId)?.accountId)
+          .filter((id): id is string => Boolean(id));
+        const restart = client === "vscodeExt" && (await needsEditorRestart(targetAccountIds));
         const report = await api.syncSessionGroupUnify({
           client, groupId: plan.groupId, sourceMemberId: plan.sourceMemberId,
           targets: actions.map(({ target, preview, mode }) => ({ targetMemberId: target.memberId, previewToken: preview.previewToken!, mode })),
-          // 插件侧：用户在确认框里点「确认同步并重启」即授权；后端只在 VS Code 确实运行时才关闭/重开。
-          ...(client === "vscodeExt" ? { restart: true } : {}),
+          ...(restart ? { restart: true } : {}),
         });
         notifyResult(report);
       } else {
@@ -314,8 +318,12 @@ export default function SessionsPage() {
 
   async function syncSafeBatch() {
     if (!detail?.safeSourceMemberId || actionBusy) return;
-    // 插件侧：运行中写入会被 VS Code 覆盖，先让用户确认「关闭并重开」，再带 restart 执行。
-    if (await vscodeRunningNow()) {
+    // 插件侧：写入目标含当前登录账号时才会被运行中的 VS Code 覆盖，先确认「关闭并重开」再执行。
+    const targetAccountIds = (detail.members ?? [])
+      .filter((member) => member.linkState === "active" && member.versionStatus === "behind")
+      .map((member) => member.accountId)
+      .filter((id): id is string => Boolean(id));
+    if (await needsEditorRestart(targetAccountIds)) {
       setRestartPrompt({ actionLabel: "关闭并同步", run: () => runSafeBatch(true) });
       return;
     }
@@ -338,7 +346,7 @@ export default function SessionsPage() {
 
   async function addMember() {
     if (!detail || !sourceMemberId || !addTargetId || actionBusy) return;
-    if (await vscodeRunningNow()) {
+    if (await needsEditorRestart([addTargetId])) {
       setRestartPrompt({ actionLabel: "关闭并复制", run: () => runAddMember(true) });
       return;
     }
@@ -681,10 +689,10 @@ function AddLinkedSessionDialog({ client, disabled, onDone, requestRestartConfir
       return next;
     });
   }
-  /** 插件侧运行探测：详情加载时的状态可能已过期，点击时实时查一次（失败按未运行处理）。 */
-  async function pluginRunningNow(): Promise<boolean> {
+  /** 预检：目标账号含当前登录账号才需要「关闭并重开」（失败按不需要处理，后端仍有实时判定兜底）。 */
+  async function pluginNeedsRestart(): Promise<boolean> {
     try {
-      return (await api.getVscodeExtStatus()).running === true;
+      return (await api.vscodeRestartPrecheck([targetAccountId])).required === true;
     } catch {
       return false;
     }
@@ -693,7 +701,7 @@ function AddLinkedSessionDialog({ client, disabled, onDone, requestRestartConfir
     if (!sourceAccount || !targetAccountId || sourceAccount.id === targetAccountId || selected.size === 0 || busy) return;
     if (client === "vscodeExt") {
       // 运行中的写入会被 VS Code 覆盖：先走页面统一的确认框授权「关闭并重开」。
-      if (await pluginRunningNow()) {
+      if (await pluginNeedsRestart()) {
         requestRestartConfirm("关闭并复制", () => copyAndLinkPlugin(true));
         return;
       }

@@ -106,6 +106,10 @@ pub fn router() -> Router {
         .route("/api/vscode-ext/switch", post(api_vscode_ext_switch))
         .route("/api/vscode-ext/detect", post(api_vscode_ext_detect))
         .route(
+            "/api/vscode-ext/restart-precheck",
+            post(api_vscode_restart_precheck),
+        )
+        .route(
             "/api/vscode-ext/session-links",
             post(api_vscode_ext_session_links_preview),
         )
@@ -1268,6 +1272,21 @@ async fn api_copy_linked_sessions(Json(body): Json<Value>) -> Response {
         Ok(value) => json_ok(value),
         Err(error) => json_err(error, StatusCode::BAD_REQUEST),
     }
+}
+
+async fn api_vscode_restart_precheck(Json(body): Json<Value>) -> Response {
+    let target_account_ids: Vec<String> = body
+        .get("targetAccountIds")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    json_ok(session_groups::vscode_restart_precheck(&target_account_ids))
 }
 
 /// 取消关联：只解除管理关系，不触碰账号内的会话内容。

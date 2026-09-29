@@ -195,7 +195,12 @@ pub fn sync_pair(
     }
     let selection = parse_selection(group_id, preview_token, mode)?;
     // 校验（resolve / 凭据 / 模式）全部通过后再关编辑器：为注定失败的请求打断用户是无谓的。
-    let guard = prepare_editor_window(client, restart, VSCODE_SYNC_RUNNING_HINT)?;
+    let guard = prepare_editor_window(
+        client,
+        restart,
+        VSCODE_SYNC_RUNNING_HINT,
+        &[context.target.uid.as_str()],
+    )?;
     let result = run_pair_sync(client, scope, &context, &[selection], guard.is_some());
     settle_editor_window(guard, result)
 }
@@ -371,7 +376,11 @@ fn sync_unify_batch_vscode(
 ) -> Result<Value, String> {
     let client = SessionClient::VscodeExt;
     let prepared = prepare_unify_targets(client, scope, group_id, source_member_id, targets)?;
-    let guard = prepare_editor_window(client, restart, VSCODE_SYNC_RUNNING_HINT)?;
+    let target_uids: Vec<&str> = prepared
+        .iter()
+        .map(|(pair, _)| pair.target.uid.as_str())
+        .collect();
+    let guard = prepare_editor_window(client, restart, VSCODE_SYNC_RUNNING_HINT, &target_uids)?;
     let editor_prepared = guard.is_some();
     let mut combined = json!({ "client": client.as_str(), "groupId": group_id, "synced": [], "skipped": [], "errors": [], "needsRecovery": false });
     for (pair, selection) in prepared {
@@ -480,7 +489,11 @@ pub fn sync_safe_batch(
         let selection = parse_selection(group_id, token, "fastForward")?;
         prepared.push((pair, selection));
     }
-    let guard = prepare_editor_window(client, restart, VSCODE_SYNC_RUNNING_HINT)?;
+    let target_uids: Vec<&str> = prepared
+        .iter()
+        .map(|(pair, _)| pair.target.uid.as_str())
+        .collect();
+    let guard = prepare_editor_window(client, restart, VSCODE_SYNC_RUNNING_HINT, &target_uids)?;
     let editor_prepared = guard.is_some();
     let result = (|| -> Result<Value, String> {
         for (pair, selection) in prepared {
@@ -654,7 +667,12 @@ pub fn add_member(
                 conversation_id: source.session_id.clone(),
             };
             // 校验（含来源内容）全部完成后，插件侧才打开编辑器生命周期窗口：为注定失败的请求关编辑器是无谓的。
-            let guard = prepare_editor_window(client, restart, VSCODE_ADD_MEMBER_RUNNING_HINT)?;
+            let guard = prepare_editor_window(
+                client,
+                restart,
+                VSCODE_ADD_MEMBER_RUNNING_HINT,
+                &[target_uid.as_str()],
+            )?;
             let result = (|| -> Result<Value, String> {
                 let (report, link_errors) = match client {
                     SessionClient::CodebuddyIde => {
@@ -791,7 +809,12 @@ pub fn copy_linked_sessions(
         return Err("勾选的会话都没有可复制的内容".to_string());
     }
     let _operation_lock = session_link::try_acquire_client_ops_lock(&paths)?;
-    let guard = prepare_editor_window(client, restart, VSCODE_ADD_MEMBER_RUNNING_HINT)?;
+    let guard = prepare_editor_window(
+        client,
+        restart,
+        VSCODE_ADD_MEMBER_RUNNING_HINT,
+        &[target_uid.as_str()],
+    )?;
     let result = (|| -> Result<Value, String> {
         let (report, link_errors) = plugin_copy_and_register(
             spec,
@@ -1029,13 +1052,53 @@ const VSCODE_SYNC_RUNNING_HINT: &str = "检测到 VS Code 正在运行，请先�
 const VSCODE_ADD_MEMBER_RUNNING_HINT: &str =
     "检测到 VS Code 正在运行，请先完全退出后再添加关联账号。";
 
-/// 关闭决策（纯函数）：`Ok(true)` = 需要关闭编辑器，`Ok(false)` = 未运行、不关不拉。
-fn plan_editor_restart(running: bool, restart: bool, manual_hint: &str) -> Result<bool, String> {
-    match (running, restart) {
-        (false, _) => Ok(false),
-        (true, false) => Err(manual_hint.to_string()),
-        (true, true) => Ok(true),
+/// 关闭决策（纯函数）：`Ok(true)` = 需要关闭编辑器，`Ok(false)` = 未运行或不涉及、不关不拉。
+///
+/// 运行中的插件只会写「当前登录账号」的数据，因此仅当**本次写入目标包含当前登录账号**时才需要
+/// 编辑器生命周期；`current_uid = None`（未登录/状态缺失）时保守按涉及处理——与 WorkBuddy 的
+/// `current_uid.map_or(true, …)` 同口径。
+fn plan_editor_restart(
+    running: bool,
+    current_uid: Option<&str>,
+    target_uids: &[&str],
+    restart: bool,
+    manual_hint: &str,
+) -> Result<bool, String> {
+    if !running {
+        return Ok(false);
     }
+    let involved = current_uid.is_none_or(|uid| target_uids.contains(&uid));
+    if !involved {
+        return Ok(false);
+    }
+    if !restart {
+        return Err(manual_hint.to_string());
+    }
+    Ok(true)
+}
+
+/// 预检：当前是否需要关闭 VS Code 才能安全执行写操作（运行中 且 目标账号含当前登录账号）。
+///
+/// 供前端决定「是否先弹确认框」；判定与写入口共用 [`plan_editor_restart`]，最终把关仍在各写入口。
+pub fn vscode_restart_precheck(target_account_ids: &[String]) -> Value {
+    let paths = SessionClient::VscodeExt.store_paths();
+    let accounts = account::load_accounts_at(&account::accounts_file_in(&paths.store_root));
+    let target_uids: Vec<String> = target_account_ids
+        .iter()
+        .filter_map(|id| {
+            accounts
+                .iter()
+                .find(|item| account::get_str(item, "id").as_deref() == Some(id.as_str()))
+        })
+        .filter_map(|item| account::get_str(item, "uid"))
+        .collect();
+    let target_refs: Vec<&str> = target_uids.iter().map(String::as_str).collect();
+    let running = vscode_ext::is_vscode_running();
+    let current_uid = vscode_ext::active_ext_uid();
+    // 以 `restart = true` 走同一决策（不会产生文案错误）：`Ok(true)` 即「需要关闭」。
+    let required = plan_editor_restart(running, current_uid.as_deref(), &target_refs, true, "")
+        .unwrap_or(false);
+    json!({ "required": required, "running": running })
 }
 
 /// 插件侧写操作的编辑器生命周期窗口（仅 `SessionClient::VscodeExt` 使用）。
@@ -1054,8 +1117,16 @@ struct VscodeEditorGuard {
 
 impl VscodeEditorGuard {
     /// 打开窗口：判定 →（必要时）关闭。校验类错误必须在此前完成，避免为注定失败的请求关编辑器。
-    fn prepare(restart: bool, manual_hint: &str) -> Result<Self, String> {
-        if !plan_editor_restart(vscode_ext::is_vscode_running(), restart, manual_hint)? {
+    fn prepare(restart: bool, manual_hint: &str, target_uids: &[&str]) -> Result<Self, String> {
+        let running = vscode_ext::is_vscode_running();
+        let current_uid = vscode_ext::active_ext_uid();
+        if !plan_editor_restart(
+            running,
+            current_uid.as_deref(),
+            target_uids,
+            restart,
+            manual_hint,
+        )? {
             return Ok(Self { relaunch: None });
         }
         match vscode_ext::close_vscode_for_switch(true)? {
@@ -1095,9 +1166,12 @@ fn prepare_editor_window(
     client: SessionClient,
     restart: bool,
     manual_hint: &str,
+    target_uids: &[&str],
 ) -> Result<Option<VscodeEditorGuard>, String> {
     match client {
-        SessionClient::VscodeExt => VscodeEditorGuard::prepare(restart, manual_hint).map(Some),
+        SessionClient::VscodeExt => {
+            VscodeEditorGuard::prepare(restart, manual_hint, target_uids).map(Some)
+        }
         SessionClient::Workbuddy | SessionClient::CodebuddyIde => Ok(None),
     }
 }
@@ -1858,21 +1932,47 @@ mod tests {
     }
 
     #[test]
-    fn plan_editor_restart_keeps_manual_hint_and_only_closes_when_authorized() {
-        // 未运行：无论是否授权都不关（也不主动拉起）。
-        assert!(!plan_editor_restart(false, true, "hint").unwrap());
-        assert!(!plan_editor_restart(false, false, "hint").unwrap());
-        // 运行中 + 未授权：原文案报错（逐字对齐既有入口文案）。
+    fn plan_editor_restart_only_closes_when_target_involves_current_login() {
+        let targets = ["uid-a", "uid-b"];
+        // 未运行：无论是否授权、是否涉及，都不关（也不主动拉起）。
+        assert!(!plan_editor_restart(false, Some("uid-a"), &targets, true, "hint").unwrap());
+        assert!(!plan_editor_restart(false, Some("uid-a"), &targets, false, "hint").unwrap());
+        // 运行中但不涉及当前登录账号：不关、不报错（即使未授权）。
+        assert!(!plan_editor_restart(true, Some("uid-other"), &targets, false, "hint").unwrap());
+        assert!(!plan_editor_restart(true, Some("uid-other"), &targets, true, "hint").unwrap());
+        // 空目标集合 + 读得到当前账号：同样不涉及。
+        assert!(!plan_editor_restart(true, Some("uid-a"), &[], false, "hint").unwrap());
+        // 运行中且涉及：未授权 → 原文案报错（逐字对齐既有入口文案）。
         assert_eq!(
-            plan_editor_restart(true, false, VSCODE_SYNC_RUNNING_HINT).unwrap_err(),
+            plan_editor_restart(
+                true,
+                Some("uid-a"),
+                &targets,
+                false,
+                VSCODE_SYNC_RUNNING_HINT
+            )
+            .unwrap_err(),
             "检测到 VS Code 正在运行，请先完全退出后再同步会话。"
         );
         assert_eq!(
-            plan_editor_restart(true, false, VSCODE_ADD_MEMBER_RUNNING_HINT).unwrap_err(),
+            plan_editor_restart(
+                true,
+                Some("uid-b"),
+                &targets,
+                false,
+                VSCODE_ADD_MEMBER_RUNNING_HINT
+            )
+            .unwrap_err(),
             "检测到 VS Code 正在运行，请先完全退出后再添加关联账号。"
         );
-        // 运行中 + 已授权：关闭。
-        assert!(plan_editor_restart(true, true, "hint").unwrap());
+        // 运行中且涉及 + 已授权：关闭。
+        assert!(plan_editor_restart(true, Some("uid-a"), &targets, true, "hint").unwrap());
+        // 读不到当前登录账号：保守按涉及处理（未授权 → 报错；已授权 → 关闭）。
+        assert_eq!(
+            plan_editor_restart(true, None, &targets, false, VSCODE_SYNC_RUNNING_HINT).unwrap_err(),
+            "检测到 VS Code 正在运行，请先完全退出后再同步会话。"
+        );
+        assert!(plan_editor_restart(true, None, &targets, true, "hint").unwrap());
     }
 
     #[test]

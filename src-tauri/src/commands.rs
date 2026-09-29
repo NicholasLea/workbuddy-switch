@@ -928,6 +928,14 @@ pub async fn copy_linked_sessions(
     .map_err(|error| error.to_string())?
 }
 
+/// 预检：是否需要关闭 VS Code 才能安全执行写操作（运行中 且 目标账号含当前登录账号）。
+///
+/// 供前端决定「是否先弹确认框」；最终把关仍在各写入口的实时判定。
+#[tauri::command(rename_all = "camelCase")]
+pub fn vscode_restart_precheck(target_account_ids: Vec<String>) -> Value {
+    session_groups::vscode_restart_precheck(&target_account_ids)
+}
+
 /// 取消关联：从会话组移除一个成员，只解除管理关系，不删除账号内的会话内容。
 #[tauri::command(rename_all = "camelCase")]
 pub async fn unlink_session_group_member(

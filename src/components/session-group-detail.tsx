@@ -149,7 +149,7 @@ export function GroupDetailPanel(props: GroupDetailPanelProps) {
     : props.client === "vscodeExt"
       ? {
           title: editorRunning ? "当前运行：VS Code" : "执行前会检查 VS Code 运行状态",
-          description: `${editorRunning ? "确认后将先关闭 VS Code，同步结束再自动打开。" : "若 VS Code 正在运行，确认后将自动关闭并在同步结束后重新打开。"}请先保存未完成的输入；执行时会再次核对实际运行状态。`,
+          description: `${editorRunning ? "若写入目标包含当前登录账号，确认后将先关闭 VS Code，同步结束再自动打开。" : "若写入目标包含当前登录账号且 VS Code 正在运行，确认后将自动关闭并在同步结束后重新打开。"}请先保存未完成的输入；执行时会再次核对实际运行状态。`,
           willRestart: editorRunning,
         }
       : null;
