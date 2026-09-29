@@ -73,6 +73,8 @@ export interface ImportPreviewAccount {
   nickname: string | null;
   email: string | null;
   hasToken: boolean;
+  /** access_token 为 WorkBuddy 加密信封：可导入，但仅切换可用（签到/积分不可用）。 */
+  encrypted: boolean;
 }
 
 /** 导入结果计数。 */

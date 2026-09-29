@@ -11,7 +11,9 @@ use crate::modules::config::{accounts_file, atomic_write, now_ms};
 use crate::modules::variant::WbVariant;
 
 /// 判断字段是否为 WorkBuddy 5.6 加密信封对象（`{$wbEncrypted, envelope}`）。
-fn is_envelope(v: &Value, key: &str) -> bool {
+///
+/// 导出导入预览与采集共用同一判定，不要在调用方复制实现。
+pub fn is_envelope(v: &Value, key: &str) -> bool {
     matches!(v.get(key), Some(Value::Object(map)) if map.contains_key("$wbEncrypted"))
 }
 

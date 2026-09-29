@@ -15,7 +15,7 @@ use crate::modules::account;
 pub struct ImportResult {
     /// 成功合入账号库的数量（含覆盖与新增）。
     pub imported: usize,
-    /// 未导入的数量（缺 access_token / 索引越界）。
+    /// 未导入的数量（缺凭据 / 索引越界）。
     pub skipped: usize,
     /// 其中覆盖了同 uid 本地账号的数量。
     pub overwritten: usize,
@@ -42,6 +42,11 @@ pub fn parse_accounts_json(text: &str) -> Result<Vec<Value>, String> {
 }
 
 /// 生成导入文件的脱敏预览（含文件内索引，不含 token）。
+///
+/// 展示字段（uid/nickname/email）一律走 `account::display_value` 折叠，与账号
+/// 列表接口同口径：WorkBuddy 5.6 加密信封等对象/数组不得漏进前端渲染路径，
+/// 否则会被当作 React 子节点渲染导致整树卸载（issue #100）。
+/// `encrypted` 标记 access_token 为加密信封：可导入，但仅切换可用。
 pub fn preview_accounts(text: &str) -> Result<Value, String> {
     let array = parse_accounts_json(text)?;
     let items: Vec<Value> = array
@@ -50,10 +55,11 @@ pub fn preview_accounts(text: &str) -> Result<Value, String> {
         .map(|(index, item)| {
             json!({
                 "index": index,
-                "uid": item.get("uid"),
-                "nickname": item.get("nickname"),
-                "email": item.get("email"),
-                "hasToken": account::get_str(item, "access_token").is_some(),
+                "uid": account::display_value(item, "uid"),
+                "nickname": account::display_value(item, "nickname"),
+                "email": account::display_value(item, "email"),
+                "hasToken": account::secret_value(item, "access_token").is_some(),
+                "encrypted": account::is_envelope(item, "access_token"),
             })
         })
         .collect();
@@ -67,16 +73,17 @@ enum MergeOutcome {
     Appended,
     /// 覆盖同 uid 的本地账号（保留导入记录原样）。
     Overwritten,
-    /// 缺少 access_token，跳过。
+    /// 缺少可导入凭据（缺失 / 空串 / 普通对象），跳过。
     Skipped,
 }
 
 /// 纯函数：把一条导入记录合并进账号列表。
 ///
 /// 按 uid 去重：同 uid 覆盖（保留导入记录原样）；uid 缺失或无法匹配则追加。
-/// 缺少 access_token 的记录跳过，不进入账号库。
+/// 凭据判定与采集口径一致（`account::secret_value`）：非空明文串或
+/// `$wbEncrypted` 加密信封均可入库，缺失 / 空串 / 普通对象跳过。
 fn merge_import_record(accounts: &mut Vec<Value>, item: &Value) -> MergeOutcome {
-    if account::get_str(item, "access_token").is_none() {
+    if account::secret_value(item, "access_token").is_none() {
         return MergeOutcome::Skipped;
     }
     if let Some(uid) = account::get_str(item, "uid").as_deref() {
@@ -316,6 +323,45 @@ mod tests {
         assert!(accounts.is_empty(), "缺 token 的记录不得进入账号库");
     }
 
+    /// 回归 issue #100：加密信封凭据按采集口径放行，且导入后原样保留（不落空串）。
+    #[test]
+    fn merge_imports_envelope_token_as_is() {
+        let mut accounts: Vec<Value> = vec![];
+        let text = r#"[{
+            "id": "env-1",
+            "uid": "u-env",
+            "nickname": {"$wbEncrypted": 1, "envelope": "nick"},
+            "access_token": {"$wbEncrypted": 1, "envelope": "a"},
+            "refresh_token": {"$wbEncrypted": 1, "envelope": "r"}
+        }]"#;
+        let result = merge_import_records(&mut accounts, text, &[0]).unwrap();
+
+        assert_eq!(result.imported, 1, "信封凭据应计入 imported");
+        assert_eq!(result.skipped, 0);
+        assert_eq!(accounts.len(), 1);
+        assert_eq!(
+            accounts[0]["access_token"],
+            json!({"$wbEncrypted": 1, "envelope": "a"}),
+            "信封凭据必须原样保留"
+        );
+        assert_eq!(accounts[0]["refresh_token"]["envelope"], "r");
+    }
+
+    /// 空串与普通对象（非信封）仍按无凭据处理：预览「缺少 token」、导入计 skipped。
+    #[test]
+    fn merge_still_skips_blank_and_plain_object_token() {
+        let mut accounts: Vec<Value> = vec![];
+        let text = r#"[
+            { "id": "blank", "uid": "u-blank", "access_token": "   " },
+            { "id": "object", "uid": "u-object", "access_token": { "token": "t" } }
+        ]"#;
+        let result = merge_import_records(&mut accounts, text, &[0, 1]).unwrap();
+
+        assert_eq!(result.imported, 0);
+        assert_eq!(result.skipped, 2);
+        assert!(accounts.is_empty(), "空串 / 普通对象不得进入账号库");
+    }
+
     #[test]
     fn merge_counts_out_of_range_index_as_skipped() {
         let mut accounts: Vec<Value> = vec![];
@@ -461,6 +507,50 @@ mod tests {
             preview["accounts"][0].get("access_token").is_none(),
             "预览不得泄露 token"
         );
+    }
+
+    /// 回归 issue #100：预览的对象字段必须折叠为 null（防 React error #31 白屏），
+    /// 信封凭据标记 encrypted，明文凭据不标记。
+    #[test]
+    fn preview_folds_object_fields_and_marks_envelope_token() {
+        let text = r#"[
+            {
+                "id": "env-1",
+                "uid": "u-env",
+                "nickname": {"$wbEncrypted": 1, "envelope": "nick"},
+                "email": {"$wbEncrypted": 1, "envelope": "mail"},
+                "access_token": {"$wbEncrypted": 1, "envelope": "a"}
+            },
+            {
+                "id": "plain-1",
+                "uid": "u-plain",
+                "nickname": "明文昵称",
+                "email": "x@y.z",
+                "access_token": "SECRET"
+            }
+        ]"#;
+        let preview = preview_accounts(text).unwrap();
+
+        assert_eq!(preview["total"], 2);
+        let env = &preview["accounts"][0];
+        assert_eq!(env["uid"], "u-env");
+        assert!(
+            env["nickname"].is_null(),
+            "信封 nickname 必须折叠为 null，不得透传对象"
+        );
+        assert!(
+            env["email"].is_null(),
+            "信封 email 必须折叠为 null，不得透传对象"
+        );
+        assert_eq!(env["hasToken"], true, "信封凭据应视为有凭据");
+        assert_eq!(env["encrypted"], true, "信封凭据应标记 encrypted");
+        assert!(env.get("access_token").is_none(), "预览不得泄露 token");
+
+        let plain = &preview["accounts"][1];
+        assert_eq!(plain["nickname"], "明文昵称");
+        assert_eq!(plain["email"], "x@y.z");
+        assert_eq!(plain["hasToken"], true);
+        assert_eq!(plain["encrypted"], false, "明文凭据不得误标 encrypted");
     }
 
     #[test]
