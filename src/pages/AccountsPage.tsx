@@ -542,11 +542,20 @@ export default function AccountsPage() {
     toast.success("导出成功", { description: text });
   }
 
-  /** 导入完成提示：计数 + token 可能过期提醒，并刷新列表。 */
-  function onImported(result: { imported: number; skipped: number; overwritten: number }) {
+  /** 导入完成提示：计数 + token 可能过期提醒（含加密凭据能力限制），并刷新列表。 */
+  function onImported(result: {
+    imported: number;
+    skipped: number;
+    overwritten: number;
+    encrypted: number;
+  }) {
     void fetchAll();
     const overwriteText = result.overwritten > 0 ? `（覆盖 ${result.overwritten} 个）` : "";
-    const text = `已导入 ${result.imported} 个${overwriteText}，跳过 ${result.skipped} 个。token 可能已过期，切换后可能需要重新登录。`;
+    const encryptedText =
+      result.encrypted > 0
+        ? `其中 ${result.encrypted} 个为加密凭据，仅可用于切换，签到/积分不可用。`
+        : "";
+    const text = `已导入 ${result.imported} 个${overwriteText}，跳过 ${result.skipped} 个。${encryptedText}token 可能已过期，切换后可能需要重新登录。`;
     toast.success("导入成功", { description: text });
   }
 
