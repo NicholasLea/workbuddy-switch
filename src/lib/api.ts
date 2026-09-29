@@ -625,24 +625,28 @@ export function syncSessionGroupPair(args: {
   previewToken: string;
   mode: SessionSyncMode;
   variantScope?: WbVariant;
+  /** 已获用户授权（确认框）时传 `true`：插件侧运行中允许关闭并重开 VS Code。 */
+  restart?: boolean;
 }): Promise<SessionGroupActionReport> {
   if (demoModeEnabled) return Promise.reject(new Error(DEMO_UNAVAILABLE_MESSAGE));
   return call("sync_session_group_pair", args as unknown as Record<string, unknown>);
 }
 
 export function syncSessionGroupUnify(args: {
-  client: "workbuddy";
+  client: "workbuddy" | "vscodeExt";
   groupId: string;
   sourceMemberId: string;
   targets: { targetMemberId: string; previewToken: string; mode: SessionSyncMode }[];
+  /** 已获用户授权（确认框）时传 `true`：插件侧运行中允许关闭并重开 VS Code。 */
+  restart?: boolean;
 }): Promise<SessionGroupActionReport> {
   if (demoModeEnabled) return Promise.reject(new Error(DEMO_UNAVAILABLE_MESSAGE));
   return call("sync_session_group_unify", args as unknown as Record<string, unknown>);
 }
 
-export function syncSessionGroupSafeBatch(client: SessionGroupClient, groupId: string, variantScope?: WbVariant): Promise<SessionGroupActionReport> {
+export function syncSessionGroupSafeBatch(client: SessionGroupClient, groupId: string, variantScope?: WbVariant, restart?: boolean): Promise<SessionGroupActionReport> {
   if (demoModeEnabled) return Promise.reject(new Error(DEMO_UNAVAILABLE_MESSAGE));
-  return call("sync_session_group_safe_batch", { client, groupId, ...(variantScope ? { variantScope } : {}) });
+  return call("sync_session_group_safe_batch", { client, groupId, ...(variantScope ? { variantScope } : {}), ...(restart ? { restart: true } : {}) });
 }
 
 export function addSessionGroupMember(args: {
@@ -651,7 +655,9 @@ export function addSessionGroupMember(args: {
   sourceMemberId: string;
   targetAccountId: string;
   variantScope?: WbVariant;
-}): Promise<{ status: "linked" | "alreadyLinked" | "copiedUnlinked" | "failed"; [key: string]: unknown }> {
+  /** 已获用户授权（确认框）时传 `true`：插件侧运行中允许关闭并重开 VS Code。 */
+  restart?: boolean;
+}): Promise<{ status: "linked" | "alreadyLinked" | "copiedUnlinked" | "failed"; editorError?: string; restartedEditor?: boolean; [key: string]: unknown }> {
   if (demoModeEnabled) return Promise.reject(new Error(DEMO_UNAVAILABLE_MESSAGE));
   return call("add_session_group_member", args as unknown as Record<string, unknown>);
 }

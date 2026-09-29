@@ -137,6 +137,22 @@ export function GroupDetailPanel(props: GroupDetailPanelProps) {
     const current = props.currentAccounts.find((item) => item.variant === variant);
     return member?.variant === variant && (!current?.uid || current.uid === member.uid || current.uid === member.accountId);
   }));
+  /** 插件侧：VS Code 是否正在运行（详情加载时的状态；执行前后端会再次核对实际状态）。 */
+  const editorRunning = props.client === "vscodeExt" && props.currentAccounts.some((current) => current.running === true);
+  /** 统一确认框的运行提示：WorkBuddy 按档位、插件按编辑器分别措辞；其他客户端不显示。 */
+  const restartNotice = props.client === "workbuddy"
+    ? {
+        title: runningVariants.length ? `当前运行：${runningVariants.map(variantLabel).join("、")}` : "执行前会检查客户端运行状态",
+        description: `${restartVariants.length ? `确认后将先关闭目标账号所在的${restartVariants.map(variantLabel).join("、")}，同步结束再自动打开。` : "若目标账号所在的客户端正在运行，确认后将自动关闭并在同步结束后重新打开。"}请先保存未完成的输入；执行时会再次核对实际运行状态。若写入待恢复，将暂停重新打开并提示处理。`,
+        willRestart: restartVariants.length > 0,
+      }
+    : props.client === "vscodeExt"
+      ? {
+          title: editorRunning ? "当前运行：VS Code" : "执行前会检查 VS Code 运行状态",
+          description: `${editorRunning ? "确认后将先关闭 VS Code，同步结束再自动打开。" : "若 VS Code 正在运行，确认后将自动关闭并在同步结束后重新打开。"}请先保存未完成的输入；执行时会再次核对实际运行状态。`,
+          willRestart: editorRunning,
+        }
+      : null;
   const summary = equal
     ? `${active.length} 个账号内容一致`
     : canBatch ? `有 ${behind.length} 个账号待同步`
@@ -303,12 +319,10 @@ export function GroupDetailPanel(props: GroupDetailPanelProps) {
           <AlertTitle className="text-xs leading-4">你选择的是共同旧版</AlertTitle>
           <AlertDescription className="text-[11px] leading-4">确认后，两条独立分支中的新增内容都会被旧版替换。</AlertDescription>
         </Alert>}
-        {props.client === "workbuddy" && changedTargets.length > 0 && <Alert variant="warning" className="py-2.5 dark:text-amber-200">
+        {restartNotice && changedTargets.length > 0 && <Alert variant="warning" className="py-2.5 dark:text-amber-200">
           <Info aria-hidden="true" />
-          <AlertTitle className="text-xs leading-4">{runningVariants.length ? `当前运行：${runningVariants.map(variantLabel).join("、")}` : "执行前会检查客户端运行状态"}</AlertTitle>
-          <AlertDescription className="text-[11px] leading-4 text-amber-900/80 dark:text-amber-200/80">
-            {restartVariants.length ? `确认后将先关闭目标账号所在的${restartVariants.map(variantLabel).join("、")}，同步结束再自动打开。` : "若目标账号所在的客户端正在运行，确认后将自动关闭并在同步结束后重新打开。"}请先保存未完成的输入；执行时会再次核对实际运行状态。若写入待恢复，将暂停重新打开并提示处理。
-          </AlertDescription>
+          <AlertTitle className="text-xs leading-4">{restartNotice.title}</AlertTitle>
+          <AlertDescription className="text-[11px] leading-4 text-amber-900/80 dark:text-amber-200/80">{restartNotice.description}</AlertDescription>
         </Alert>}
         {overwrittenTargets.length > 0 && <p className="text-sm text-destructive">其中 {overwrittenTargets.length} 个账号有独有内容；确认后，它们现有的会话内容会被完整替换。</p>}
         {blockedTargets.length > 0 && <div role="alert" className="space-y-1 rounded-lg bg-muted p-3 text-sm">
@@ -318,7 +332,7 @@ export function GroupDetailPanel(props: GroupDetailPanelProps) {
         {blockedTargets.length === 0 && <p className="text-xs text-muted-foreground">将更新 {changedTargets.length} 个账号。执行前会重新校验各副本内容；若内容已变化，操作会停止并报告结果。</p>}
         <AlertDialogFooter>
           <AlertDialogCancel disabled={props.busy}>取消</AlertDialogCancel>
-          {blockedTargets.length === 0 && <DemoAction><Button variant={overwrittenTargets.length > 0 ? "destructive" : "default"} disabled={props.busy} onClick={() => void props.onConfirmUnify()}>{props.busy ? "处理中…" : restartVariants.length ? "确认同步并重启" : "确认统一"}</Button></DemoAction>}
+          {blockedTargets.length === 0 && <DemoAction><Button variant={overwrittenTargets.length > 0 ? "destructive" : "default"} disabled={props.busy} onClick={() => void props.onConfirmUnify()}>{props.busy ? "处理中…" : restartNotice?.willRestart ? "确认同步并重启" : "确认统一"}</Button></DemoAction>}
         </AlertDialogFooter>
       </AlertDialogContent>
     </AlertDialog>

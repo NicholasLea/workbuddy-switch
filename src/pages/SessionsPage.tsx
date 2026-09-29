@@ -11,6 +11,7 @@ import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
+import { AlertDialog, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog";
 import { DialogAutoHeight } from "@/components/ui/dialog-auto-height";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -51,6 +52,8 @@ export default function SessionsPage() {
   const [detailOpen, setDetailOpen] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
   const [contentWidth, setContentWidth] = useState(0);
+  /** 插件侧「VS Code 运行中」的确认框：确认后执行 `run`（带 restart），取消则丢弃。 */
+  const [restartPrompt, setRestartPrompt] = useState<{ actionLabel: string; run: () => Promise<void> } | null>(null);
   const rootRef = useRef<HTMLDivElement>(null);
   const openerRef = useRef<HTMLElement | null>(null);
   const detailMode = "modal";
@@ -74,6 +77,18 @@ export default function SessionsPage() {
     setAddOpen(false);
     setDetailOpen(true);
   }
+  /**
+   * 点击时实时探测 VS Code 是否在运行（详情加载时读到的状态可能已过期）。
+   * 探测失败按「未运行」处理：后端在 `restart=false` 时仍有最终判定，不会误关编辑器。
+   */
+  async function vscodeRunningNow(): Promise<boolean> {
+    if (client !== "vscodeExt") return false;
+    try {
+      return (await api.getVscodeExtStatus()).running === true;
+    } catch {
+      return false;
+    }
+  }
   const scope = client === "codebuddyIde" ? variantScope : undefined;
   const listRequestId = useRef(0);
   const detailRequestId = useRef(0);
@@ -93,7 +108,7 @@ export default function SessionsPage() {
       : client === "codebuddyIde"
         ? [api.getCodebuddyCnIdeStatus().then((status) => ({ variant: "cn" as const, accountId: status.activeAccountId })),
           api.getCodebuddyIdeStatus().then((status) => ({ variant: "ai" as const, accountId: status.activeAccountId }))]
-        : [api.getVscodeExtStatus().then((status) => ({ accountId: status.activeAccountId }))];
+        : [api.getVscodeExtStatus().then((status) => ({ accountId: status.activeAccountId, running: status.running }))];
     void Promise.allSettled(reads).then((results) => {
       if (live) setCurrentAccounts(results.flatMap((result) => result.status === "fulfilled" ? [result.value] : []));
     });
@@ -259,10 +274,12 @@ export default function SessionsPage() {
     setUnifyPlan(null);
     setActionBusy(true);
     try {
-      if (client === "workbuddy" && actions.length > 0) {
+      if ((client === "workbuddy" || client === "vscodeExt") && actions.length > 0) {
         const report = await api.syncSessionGroupUnify({
           client, groupId: plan.groupId, sourceMemberId: plan.sourceMemberId,
           targets: actions.map(({ target, preview, mode }) => ({ targetMemberId: target.memberId, previewToken: preview.previewToken!, mode })),
+          // 插件侧：用户在确认框里点「确认同步并重启」即授权；后端只在 VS Code 确实运行时才关闭/重开。
+          ...(client === "vscodeExt" ? { restart: true } : {}),
         });
         notifyResult(report);
       } else {
@@ -295,9 +312,19 @@ export default function SessionsPage() {
 
   async function syncSafeBatch() {
     if (!detail?.safeSourceMemberId || actionBusy) return;
+    // 插件侧：运行中写入会被 VS Code 覆盖，先让用户确认「关闭并重开」，再带 restart 执行。
+    if (await vscodeRunningNow()) {
+      setRestartPrompt({ actionLabel: "关闭并同步", run: () => runSafeBatch(true) });
+      return;
+    }
+    await runSafeBatch(false);
+  }
+
+  async function runSafeBatch(restart: boolean) {
+    if (!detail?.safeSourceMemberId || actionBusy) return;
     setActionBusy(true);
     try {
-      const report = await api.syncSessionGroupSafeBatch(client, detail.groupId, scope);
+      const report = await api.syncSessionGroupSafeBatch(client, detail.groupId, scope, restart);
       notifyResult(report);
       await reloadSelectedGroup();
     } catch (error) {
@@ -309,6 +336,15 @@ export default function SessionsPage() {
 
   async function addMember() {
     if (!detail || !sourceMemberId || !addTargetId || actionBusy) return;
+    if (await vscodeRunningNow()) {
+      setRestartPrompt({ actionLabel: "关闭并复制", run: () => runAddMember(true) });
+      return;
+    }
+    await runAddMember(false);
+  }
+
+  async function runAddMember(restart: boolean) {
+    if (!detail || !sourceMemberId || !addTargetId || actionBusy) return;
     setActionBusy(true);
     try {
       const report = await api.addSessionGroupMember({
@@ -317,16 +353,29 @@ export default function SessionsPage() {
         sourceMemberId,
         targetAccountId: addTargetId,
         variantScope: scope,
+        restart,
       });
-      if (report.status === "linked") toast.success("已复制并添加到关联组");
+      if (report.status === "linked") toast.success("已复制并添加到关联组", report.restartedEditor ? { description: "已重新打开 VS Code" } : undefined);
       else if (report.status === "alreadyLinked") toast.info("该账号已在关联组中");
       else if (report.status === "copiedUnlinked") toast.warning("会话已复制，但没有建立关联", { description: JSON.stringify(report.linkErrors ?? []) });
       else toast.error("添加关联账号失败");
+      if (report.editorError) toast.warning("VS Code 未能自动重新打开", { description: report.editorError });
       await reloadSelectedGroup();
     } catch (error) {
       toast.error("添加关联账号失败", { description: api.asError(error) });
     } finally {
       setActionBusy(false);
+    }
+  }
+
+  /** 确认框「关闭并继续」：执行动作，结束后关闭确认框（失败由动作内部 toast）。 */
+  async function confirmRestart() {
+    const prompt = restartPrompt;
+    if (!prompt || actionBusy) return;
+    try {
+      await prompt.run();
+    } finally {
+      setRestartPrompt(null);
     }
   }
 
@@ -475,6 +524,22 @@ export default function SessionsPage() {
           <DialogAutoHeight>{detailPanel}</DialogAutoHeight>
         </DialogContent>
       </Dialog>
+      {/* 插件侧写操作的运行中确认框：写入会被运行中的 VS Code 覆盖，需要先关闭并在结束后重开。 */}
+      <AlertDialog open={!!restartPrompt} onOpenChange={(open) => { if (!open && !actionBusy) setRestartPrompt(null); }}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>同步前需要重启 VS Code</AlertDialogTitle>
+            <AlertDialogDescription>
+              检测到 VS Code 正在运行：运行中的写入会被编辑器覆盖。确认后将先关闭 VS Code（未保存内容由 VS Code 自身提示保护，最多等待 60 秒），完成后再自动重新打开。
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          {actionBusy && <p role="status" className="flex items-center gap-2 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin" />正在关闭 VS Code 并处理，请勿关闭本窗口…</p>}
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={actionBusy}>取消</AlertDialogCancel>
+            <DemoAction><Button disabled={actionBusy} onClick={() => void confirmRestart()}>{actionBusy ? "处理中…" : restartPrompt?.actionLabel ?? "关闭并继续"}</Button></DemoAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }
@@ -745,13 +810,17 @@ function formatDate(timestamp: number): string {
   return new Intl.DateTimeFormat("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }).format(timestamp);
 }
 
-function notifyResult(report: { synced?: unknown[]; skipped?: unknown[]; errors?: { error: string }[]; needsRecovery?: boolean; temporaryFiles?: { reason: string }[]; restartedVariants?: WbVariant[] }, targetName?: string) {
+function notifyResult(report: { synced?: unknown[]; skipped?: unknown[]; errors?: { error: string }[]; needsRecovery?: boolean; temporaryFiles?: { reason: string }[]; restartedVariants?: WbVariant[]; restartedEditor?: boolean; editorError?: string }, targetName?: string) {
   const synced = report.synced?.length ?? 0;
   const skipped = report.skipped?.length ?? 0;
   const errors = report.errors ?? [];
-  if (synced > 0) toast.success(targetName ? `已同步到「${targetName}」` : `已同步 ${synced} 个会话`, { description: `完成 ${synced} 项${report.restartedVariants?.length ? `，已重新打开 ${report.restartedVariants.map(variantLabel).join("、")}` : ""}` });
+  const restartHint = report.restartedVariants?.length
+    ? `，已重新打开 ${report.restartedVariants.map(variantLabel).join("、")}`
+    : report.restartedEditor ? "，已重新打开 VS Code" : "";
+  if (synced > 0) toast.success(targetName ? `已同步到「${targetName}」` : `已同步 ${synced} 个会话`, { description: `完成 ${synced} 项${restartHint}` });
   if (skipped > 0) toast.warning(`有 ${skipped} 项跳过`, { description: "预览过期或复核后不再符合安全条件的项不会计为成功。" });
   if (errors.length > 0) toast.error("部分会话同步失败", { description: errors.map((item) => item.error).join("；") });
   if (report.needsRecovery) toast.error("会话操作待恢复", { description: report.temporaryFiles?.map((item) => item.reason).join("；") || "已保留恢复所需材料。" });
+  if (report.editorError) toast.warning("VS Code 未能自动重新打开", { description: report.editorError });
   if (synced === 0 && skipped === 0 && errors.length === 0 && !report.needsRecovery) toast.info("当前没有需要同步的副本");
 }

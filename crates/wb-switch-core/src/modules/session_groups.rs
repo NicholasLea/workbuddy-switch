@@ -178,6 +178,7 @@ pub fn preview_pair(
 }
 
 /// Sync one explicit pair. The existing kernel revalidates the namespace/group/member/content token.
+#[allow(clippy::too_many_arguments)] // 参数都是本次同步的显式输入（与 rotate.rs 同口径）
 pub fn sync_pair(
     client: SessionClient,
     scope: Option<WbVariant>,
@@ -186,13 +187,17 @@ pub fn sync_pair(
     target_member_id: &str,
     preview_token: &str,
     mode: &str,
+    restart: bool,
 ) -> Result<Value, String> {
     let context = resolve_pair(client, scope, group_id, source_member_id, target_member_id)?;
     if preview_token.trim().is_empty() {
         return Err("缺少会话同步预览凭据".to_string());
     }
     let selection = parse_selection(group_id, preview_token, mode)?;
-    run_pair_sync(client, scope, &context, &[selection])
+    // 校验（resolve / 凭据 / 模式）全部通过后再关编辑器：为注定失败的请求打断用户是无谓的。
+    let guard = prepare_editor_window(client, restart, VSCODE_SYNC_RUNNING_HINT)?;
+    let result = run_pair_sync(client, scope, &context, &[selection], guard.is_some());
+    settle_editor_window(guard, result)
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -203,19 +208,39 @@ pub struct GroupUnifyTarget {
     pub mode: String,
 }
 
-/// Apply an explicit WorkBuddy group choice in one lifecycle window. Only a running
-/// variant whose current login is a write target is closed, and only variants that
-/// were closed here are reopened. Pair kernels still validate every preview token.
+/// Apply an explicit group choice in one lifecycle window. WorkBuddy closes only a running
+/// variant whose current login is a write target; the VS Code plugin closes the editor when the
+/// caller was authorized (`restart`). Only clients closed here are reopened. Pair kernels still
+/// validate every preview token.
 pub fn sync_unify_batch(
     client: SessionClient,
     scope: Option<WbVariant>,
     group_id: &str,
     source_member_id: &str,
     targets: &[GroupUnifyTarget],
+    restart: bool,
 ) -> Result<Value, String> {
-    if client != SessionClient::Workbuddy || scope.is_some() {
-        return Err("仅 WorkBuddy 会话支持自动重启后整组统一".to_string());
+    match client {
+        SessionClient::Workbuddy => {
+            sync_unify_batch_workbuddy(scope, group_id, source_member_id, targets)
+        }
+        SessionClient::VscodeExt => {
+            sync_unify_batch_vscode(scope, group_id, source_member_id, targets, restart)
+        }
+        SessionClient::CodebuddyIde => {
+            Err("仅 WorkBuddy 与 CodeBuddy 插件会话支持整组统一".to_string())
+        }
     }
+}
+
+/// Resolve + validate every target before anything is closed or written.
+fn prepare_unify_targets(
+    client: SessionClient,
+    scope: Option<WbVariant>,
+    group_id: &str,
+    source_member_id: &str,
+    targets: &[GroupUnifyTarget],
+) -> Result<Vec<(PairContext, SyncSelection)>, String> {
     if targets.is_empty() {
         return Err("没有需要同步的目标副本".to_string());
     }
@@ -235,6 +260,18 @@ pub fn sync_unify_batch(
         let selection = parse_selection(group_id, &target.preview_token, &target.mode)?;
         prepared.push((pair, selection));
     }
+    Ok(prepared)
+}
+
+/// WorkBuddy：只关闭「运行中且当前登录是写入目标」的档位，只重开本次关闭的档位。
+fn sync_unify_batch_workbuddy(
+    scope: Option<WbVariant>,
+    group_id: &str,
+    source_member_id: &str,
+    targets: &[GroupUnifyTarget],
+) -> Result<Value, String> {
+    let client = SessionClient::Workbuddy;
+    let prepared = prepare_unify_targets(client, scope, group_id, source_member_id, targets)?;
 
     let restart_variants = WbVariant::ALL
         .into_iter()
@@ -267,7 +304,7 @@ pub fn sync_unify_batch(
 
     let mut combined = json!({ "client": client.as_str(), "groupId": group_id, "synced": [], "skipped": [], "errors": [], "needsRecovery": false, "temporaryFiles": [], "restartedVariants": [] });
     for (pair, selection) in prepared {
-        match run_pair_sync(client, scope, &pair, &[selection]) {
+        match run_pair_sync(client, scope, &pair, &[selection], false) {
             Ok(report) => {
                 merge_sync_report(&mut combined, report);
                 if combined["needsRecovery"] == true {
@@ -323,6 +360,34 @@ pub fn sync_unify_batch(
     Ok(combined)
 }
 
+/// VS Code 插件：全部校验通过后打开编辑器生命周期窗口（`restart=true` 时关闭），
+/// 窗口内跑完全部目标再收尾重开；插件侧没有 WorkBuddy 的 `needsRecovery` 语义。
+fn sync_unify_batch_vscode(
+    scope: Option<WbVariant>,
+    group_id: &str,
+    source_member_id: &str,
+    targets: &[GroupUnifyTarget],
+    restart: bool,
+) -> Result<Value, String> {
+    let client = SessionClient::VscodeExt;
+    let prepared = prepare_unify_targets(client, scope, group_id, source_member_id, targets)?;
+    let guard = prepare_editor_window(client, restart, VSCODE_SYNC_RUNNING_HINT)?;
+    let editor_prepared = guard.is_some();
+    let mut combined = json!({ "client": client.as_str(), "groupId": group_id, "synced": [], "skipped": [], "errors": [], "needsRecovery": false });
+    for (pair, selection) in prepared {
+        match run_pair_sync(client, scope, &pair, &[selection], editor_prepared) {
+            Ok(report) => merge_sync_report(&mut combined, report),
+            Err(error) => {
+                combined["errors"].as_array_mut().unwrap().push(json!({
+                    "error": format!("{}：{error}", pair.target.uid),
+                }));
+                break;
+            }
+        }
+    }
+    settle_editor_window(guard, Ok(combined))
+}
+
 fn running_target_needs_restart(variant: WbVariant, target_uid: &str) -> bool {
     should_restart_running_target(
         process::is_workbuddy_running(variant),
@@ -336,7 +401,7 @@ fn should_restart_running_target(
     current_uid: Option<&str>,
     target_uid: &str,
 ) -> bool {
-    running && current_uid.map_or(true, |uid| uid == target_uid)
+    running && current_uid.is_none_or(|uid| uid == target_uid)
 }
 
 fn workbuddy_variant_label(variant: WbVariant) -> &'static str {
@@ -362,6 +427,7 @@ pub fn sync_safe_batch(
     client: SessionClient,
     scope: Option<WbVariant>,
     group_id: &str,
+    restart: bool,
 ) -> Result<Value, String> {
     let detail = detail(client, scope, group_id)?;
     let source_member_id = detail
@@ -386,6 +452,9 @@ pub fn sync_safe_batch(
         })
         .collect::<Vec<_>>();
     let mut combined = json!({ "client": client.as_str(), "groupId": group_id, "synced": [], "skipped": [], "errors": [], "needsRecovery": false });
+    // 准备阶段：全部目标的复核与凭据都在关闭编辑器之前完成（复核失败/不再安全快进的项照旧跳过），
+    // 避免为注定失败的请求打断用户。
+    let mut prepared = Vec::new();
     for target_member_id in targets {
         let pair = resolve_pair(
             client,
@@ -409,10 +478,18 @@ pub fn sync_safe_batch(
             .and_then(Value::as_str)
             .ok_or_else(|| "重新预览未返回可执行凭据".to_string())?;
         let selection = parse_selection(group_id, token, "fastForward")?;
-        let report = run_pair_sync(client, scope, &pair, &[selection])?;
-        merge_sync_report(&mut combined, report);
+        prepared.push((pair, selection));
     }
-    Ok(combined)
+    let guard = prepare_editor_window(client, restart, VSCODE_SYNC_RUNNING_HINT)?;
+    let editor_prepared = guard.is_some();
+    let result = (|| -> Result<Value, String> {
+        for (pair, selection) in prepared {
+            let report = run_pair_sync(client, scope, &pair, &[selection], editor_prepared)?;
+            merge_sync_report(&mut combined, report);
+        }
+        Ok(combined)
+    })();
+    settle_editor_window(guard, result)
 }
 
 /// Copy one member into a compatible saved account and register it in the same namespace.
@@ -422,6 +499,7 @@ pub fn add_member(
     group_id: &str,
     source_member_id: &str,
     target_account_id: &str,
+    restart: bool,
 ) -> Result<Value, String> {
     client.validate_scope(scope)?;
     let paths = client.store_paths();
@@ -471,8 +549,11 @@ pub fn add_member(
         SessionClient::Workbuddy => {
             let source_acc = account_by_uid(&accounts, &source.uid)
                 .ok_or_else(|| "来源账号已不在本机账号库中".to_string())?;
-            let report =
-                session::copy_sessions_cross(&source_acc, &target, &[source.session_id.clone()])?;
+            let report = session::copy_sessions_cross(
+                &source_acc,
+                &target,
+                std::slice::from_ref(&source.session_id),
+            )?;
             let copied = report
                 .get("copied")
                 .and_then(Value::as_array)
@@ -522,8 +603,6 @@ pub fn add_member(
                         "检测到 CodeBuddy IDE 正在运行，请先完全退出后再添加关联账号。".to_string(),
                     );
                 }
-            } else if vscode_ext::is_vscode_running() {
-                return Err("检测到 VS Code 正在运行，请先完全退出后再添加关联账号。".to_string());
             }
             let root = client
                 .data_root()
@@ -549,61 +628,66 @@ pub fn add_member(
                 .backup_root()
                 .join(spec.backup_kind)
                 .join(config::utc_iso());
-            let report = match client {
-                SessionClient::CodebuddyIde => {
-                    codebuddy_ide_session::copy_codebuddy_ide_sessions_in(
+            // 校验（含来源内容）全部完成后，插件侧才打开编辑器生命周期窗口：为注定失败的请求关编辑器是无谓的。
+            let guard = prepare_editor_window(client, restart, VSCODE_ADD_MEMBER_RUNNING_HINT)?;
+            let result = (|| -> Result<Value, String> {
+                let report = match client {
+                    SessionClient::CodebuddyIde => {
+                        codebuddy_ide_session::copy_codebuddy_ide_sessions_in(
+                            &root,
+                            &backup_root,
+                            &source.uid,
+                            &target_uid,
+                            &[item],
+                        )?
+                    }
+                    SessionClient::VscodeExt => vscode_session::copy_sessions_in(
                         &root,
                         &backup_root,
                         &source.uid,
                         &target_uid,
                         &[item],
-                    )?
+                    )?,
+                    SessionClient::Workbuddy => unreachable!(),
+                };
+                let copied = report
+                    .get("copied")
+                    .and_then(Value::as_array)
+                    .map_or(0, Vec::len);
+                if copied == 0 {
+                    return Ok(
+                        json!({ "status": "failed", "client": client.as_str(), "groupId": group_id, "report": report }),
+                    );
                 }
-                SessionClient::VscodeExt => vscode_session::copy_sessions_in(
-                    &root,
-                    &backup_root,
-                    &source.uid,
-                    &target_uid,
-                    &[item],
-                )?,
-                SessionClient::Workbuddy => unreachable!(),
-            };
-            let copied = report
-                .get("copied")
-                .and_then(Value::as_array)
-                .map_or(0, Vec::len);
-            if copied == 0 {
-                return Ok(
-                    json!({ "status": "failed", "client": client.as_str(), "groupId": group_id, "report": report }),
-                );
-            }
-            let link_errors = match client {
-                SessionClient::CodebuddyIde => {
-                    codebuddy_ide_session_sync::register_copied_sessions(
-                        &root, &paths, variant, &report,
-                    )
+                let link_errors = match client {
+                    SessionClient::CodebuddyIde => {
+                        codebuddy_ide_session_sync::register_copied_sessions(
+                            &root, &paths, variant, &report,
+                        )
+                    }
+                    SessionClient::VscodeExt => vscode_session_sync::register_copied_sessions_in(
+                        VSCODE_STORE,
+                        &root,
+                        &paths,
+                        variant,
+                        &report,
+                    ),
+                    SessionClient::Workbuddy => unreachable!(),
+                };
+                if !link_errors.is_empty() {
+                    return Ok(json!({
+                        "status": "copiedUnlinked",
+                        "client": client.as_str(),
+                        "groupId": group_id,
+                        "report": report,
+                        "linkErrors": link_errors,
+                    }));
                 }
-                SessionClient::VscodeExt => vscode_session_sync::register_copied_sessions_in(
-                    VSCODE_STORE,
-                    &root,
-                    &paths,
-                    variant,
-                    &report,
-                ),
-                SessionClient::Workbuddy => unreachable!(),
-            };
-            if !link_errors.is_empty() {
-                return Ok(json!({
-                    "status": "copiedUnlinked",
-                    "client": client.as_str(),
-                    "groupId": group_id,
-                    "report": report,
-                    "linkErrors": link_errors,
-                }));
-            }
-            Ok(
-                json!({ "status": "linked", "client": client.as_str(), "groupId": group_id, "report": report, "linkErrors": [] }),
-            )
+                Ok(
+                    json!({ "status": "linked", "client": client.as_str(), "groupId": group_id, "report": report, "linkErrors": [] }),
+                )
+            })();
+            settle_editor_window(guard, result)
         }
     }
 }
@@ -796,11 +880,126 @@ fn preview_resolved_pair(
     }))
 }
 
+/// 插件侧同步入口运行中的报错文案（`restart=false`，逐字保持既有文案）。
+const VSCODE_SYNC_RUNNING_HINT: &str = "检测到 VS Code 正在运行，请先完全退出后再同步会话。";
+
+/// 插件侧「添加关联账号」运行中的报错文案（`restart=false`，逐字保持既有文案）。
+const VSCODE_ADD_MEMBER_RUNNING_HINT: &str =
+    "检测到 VS Code 正在运行，请先完全退出后再添加关联账号。";
+
+/// 关闭决策（纯函数）：`Ok(true)` = 需要关闭编辑器，`Ok(false)` = 未运行、不关不拉。
+fn plan_editor_restart(running: bool, restart: bool, manual_hint: &str) -> Result<bool, String> {
+    match (running, restart) {
+        (false, _) => Ok(false),
+        (true, false) => Err(manual_hint.to_string()),
+        (true, true) => Ok(true),
+    }
+}
+
+/// 插件侧写操作的编辑器生命周期窗口（仅 `SessionClient::VscodeExt` 使用）。
+///
+/// - 未运行 → 不关闭、不主动拉起；
+/// - 运行中 + `restart=false` → `Err(manual_hint)`（各入口保留自己的既有文案）；
+/// - 运行中 + `restart=true` → 复用 [`vscode_ext::close_vscode_for_switch`] 优雅关闭，
+///   窗口结束后 best-effort 重开。
+///
+/// **单窗口**：调用方在窗口内跑完全部目标才收尾，全程只关 / 开各一次；任何失败路径都必须
+/// 经 [`fail`](Self::fail) 收尾，保证「关了的要开回来」，且不对未运行者主动拉起。
+struct VscodeEditorGuard {
+    /// 本次由我们关闭的编辑器的重开动作；`None` = 本来就没运行（或关闭前已自行退出）。
+    relaunch: Option<Box<dyn FnOnce() -> Result<(), String>>>,
+}
+
+impl VscodeEditorGuard {
+    /// 打开窗口：判定 →（必要时）关闭。校验类错误必须在此前完成，避免为注定失败的请求关编辑器。
+    fn prepare(restart: bool, manual_hint: &str) -> Result<Self, String> {
+        if !plan_editor_restart(vscode_ext::is_vscode_running(), restart, manual_hint)? {
+            return Ok(Self { relaunch: None });
+        }
+        match vscode_ext::close_vscode_for_switch(true)? {
+            None => Ok(Self { relaunch: None }),
+            Some(closed) => Ok(Self {
+                relaunch: Some(Box::new(move || {
+                    vscode_ext::relaunch_closed_editor(&closed)
+                })),
+            }),
+        }
+    }
+
+    /// 本次窗口是否真的关闭了编辑器（报告字段只认「我们关的 + 重开成功」）。
+    fn closed_by_us(&self) -> bool {
+        self.relaunch.is_some()
+    }
+
+    /// 成功收尾：重开（仅本次由我们关闭时）。`Err` = 重开失败，操作本身已成功。
+    fn finish(self) -> Result<(), String> {
+        match self.relaunch {
+            None => Ok(()),
+            Some(relaunch) => relaunch(),
+        }
+    }
+
+    /// 失败收尾：best-effort 重开，并把重开失败信息追加到原错误之后（不吞原错误）。
+    fn fail(self, error: String) -> String {
+        match self.finish() {
+            Ok(()) => error,
+            Err(launch_error) => format!("{error}\n\n{launch_error}"),
+        }
+    }
+}
+
+/// 非插件侧不涉及编辑器生命周期（`Ok(None)`）；插件侧按 `restart` 打开窗口。
+fn prepare_editor_window(
+    client: SessionClient,
+    restart: bool,
+    manual_hint: &str,
+) -> Result<Option<VscodeEditorGuard>, String> {
+    match client {
+        SessionClient::VscodeExt => VscodeEditorGuard::prepare(restart, manual_hint).map(Some),
+        SessionClient::Workbuddy | SessionClient::CodebuddyIde => Ok(None),
+    }
+}
+
+/// 插件侧写操作的统一收尾：重开编辑器并把结果并入报告。
+///
+/// - 重开成功且本次确实关过 → 报告补 `restartedEditor: true`；
+/// - 重开失败不进整体 `Err`（操作本身已成功）：能进 `errors[]` 就进，否则挂 `editorError`。
+fn settle_editor_window(
+    guard: Option<VscodeEditorGuard>,
+    result: Result<Value, String>,
+) -> Result<Value, String> {
+    let Some(guard) = guard else {
+        return result;
+    };
+    match result {
+        Ok(mut report) => {
+            let closed_by_us = guard.closed_by_us();
+            match guard.finish() {
+                Ok(()) => {
+                    if closed_by_us {
+                        report["restartedEditor"] = json!(true);
+                    }
+                }
+                Err(error) => {
+                    let message = format!("会话已处理，但 VS Code 重新打开失败：{error}");
+                    match report.get_mut("errors").and_then(Value::as_array_mut) {
+                        Some(errors) => errors.push(json!({ "error": message })),
+                        None => report["editorError"] = json!(message),
+                    }
+                }
+            }
+            Ok(report)
+        }
+        Err(error) => Err(guard.fail(error)),
+    }
+}
+
 fn run_pair_sync(
     client: SessionClient,
     scope: Option<WbVariant>,
     pair: &PairContext,
     selections: &[SyncSelection],
+    editor_prepared: bool,
 ) -> Result<Value, String> {
     let paths = client.store_paths();
     let report = match client {
@@ -828,8 +1027,9 @@ fn run_pair_sync(
         }
         SessionClient::VscodeExt => {
             let _operation_lock = session_link::try_acquire_client_ops_lock(&paths)?;
-            if vscode_ext::is_vscode_running() {
-                return Err("检测到 VS Code 正在运行，请先完全退出后再同步会话。".to_string());
+            // `editor_prepared` = 调用方已在生命周期窗口内处理过编辑器（已关闭或本来未运行）。
+            if !editor_prepared && vscode_ext::is_vscode_running() {
+                return Err(VSCODE_SYNC_RUNNING_HINT.to_string());
             }
             let root = client
                 .data_root()
@@ -1191,9 +1391,7 @@ fn aggregate_group_state(
     let mut has_behind = false;
     let mut has_diverge = false;
     let mut has_missing = false;
-    let mut has_unknown = false;
-    for index in 0..views.len() {
-        let view = &mut views[index];
+    for (index, view) in views.iter_mut().enumerate() {
         match view.member.state {
             MemberState::Stale => {
                 view.version_status = "stale";
@@ -1212,7 +1410,6 @@ fn aggregate_group_state(
                 ContentState::Unavailable(reason) => {
                     view.version_status = "unknown";
                     view.reason = reason.clone();
-                    has_unknown = true;
                 }
                 ContentState::Ready(_) => {
                     if let Some(source_index) = safe_source {
@@ -1234,7 +1431,6 @@ fn aggregate_group_state(
                         } else {
                             view.version_status = "unknown";
                             view.reason = "重新检查后无法确认此成员状态".to_string();
-                            has_unknown = true;
                         }
                     } else {
                         let reasons = active
@@ -1258,7 +1454,6 @@ fn aggregate_group_state(
                                 .first()
                                 .map(|(_, reason)| reason.clone())
                                 .unwrap_or_else(|| "缺少可比较的关联成员".to_string());
-                            has_unknown = true;
                         }
                     }
                 }
@@ -1276,9 +1471,8 @@ fn aggregate_group_state(
         "diverge"
     } else if has_missing {
         "missing"
-    } else if has_unknown {
-        "unknown"
     } else {
+        // 无任何可判定的状态标记时同样回退为「无法确认」（原 `has_unknown` 分支与 else 同体）。
         "unknown"
     };
 
@@ -1519,6 +1713,113 @@ mod tests {
             Some("target"),
             "target"
         ));
+    }
+
+    #[test]
+    fn plan_editor_restart_keeps_manual_hint_and_only_closes_when_authorized() {
+        // 未运行：无论是否授权都不关（也不主动拉起）。
+        assert!(!plan_editor_restart(false, true, "hint").unwrap());
+        assert!(!plan_editor_restart(false, false, "hint").unwrap());
+        // 运行中 + 未授权：原文案报错（逐字对齐既有入口文案）。
+        assert_eq!(
+            plan_editor_restart(true, false, VSCODE_SYNC_RUNNING_HINT).unwrap_err(),
+            "检测到 VS Code 正在运行，请先完全退出后再同步会话。"
+        );
+        assert_eq!(
+            plan_editor_restart(true, false, VSCODE_ADD_MEMBER_RUNNING_HINT).unwrap_err(),
+            "检测到 VS Code 正在运行，请先完全退出后再添加关联账号。"
+        );
+        // 运行中 + 已授权：关闭。
+        assert!(plan_editor_restart(true, true, "hint").unwrap());
+    }
+
+    #[test]
+    fn settle_editor_window_reports_restart_only_when_closed_here() {
+        // 未关过（本来没运行或关闭前已退出）：不加字段、不调用重开。
+        let report = settle_editor_window(
+            Some(VscodeEditorGuard { relaunch: None }),
+            Ok(json!({ "errors": [] })),
+        )
+        .unwrap();
+        assert!(report.get("restartedEditor").is_none());
+        assert!(report["errors"].as_array().unwrap().is_empty());
+
+        // 本次关过且重开成功：restartedEditor = true。
+        let report = settle_editor_window(
+            Some(VscodeEditorGuard {
+                relaunch: Some(Box::new(|| Ok(()))),
+            }),
+            Ok(json!({ "errors": [] })),
+        )
+        .unwrap();
+        assert_eq!(report["restartedEditor"], json!(true));
+    }
+
+    #[test]
+    fn settle_editor_window_degrades_restart_failure_without_failing_operation() {
+        // 重开失败：操作仍返回 Ok，失败信息进 errors[]（不能只报成功）。
+        let report = settle_editor_window(
+            Some(VscodeEditorGuard {
+                relaunch: Some(Box::new(|| Err("open 超时".to_string()))),
+            }),
+            Ok(json!({ "errors": [] })),
+        )
+        .unwrap();
+        assert!(report.get("restartedEditor").is_none());
+        let errors = report["errors"].as_array().unwrap();
+        assert_eq!(errors.len(), 1);
+        let message = errors[0]["error"].as_str().unwrap();
+        assert!(message.contains("VS Code 重新打开失败"), "{message}");
+        assert!(message.contains("open 超时"), "{message}");
+
+        // 没有 errors 数组（add_member 形态）：失败信息挂顶层 editorError。
+        let report = settle_editor_window(
+            Some(VscodeEditorGuard {
+                relaunch: Some(Box::new(|| Err("open 超时".to_string()))),
+            }),
+            Ok(json!({ "status": "linked" })),
+        )
+        .unwrap();
+        assert_eq!(report["status"], json!("linked"));
+        assert!(report["editorError"]
+            .as_str()
+            .unwrap()
+            .contains("VS Code 重新打开失败"));
+    }
+
+    #[test]
+    fn settle_editor_window_relaunches_on_failure_and_keeps_original_error() {
+        // 操作失败：必须 best-effort 重开，原错误保留。
+        let error = settle_editor_window(
+            Some(VscodeEditorGuard {
+                relaunch: Some(Box::new(|| Ok(()))),
+            }),
+            Err("同步失败".to_string()),
+        )
+        .unwrap_err();
+        assert_eq!(error, "同步失败");
+
+        // 重开也失败：两条信息都要给用户（他不知道编辑器还关着，也不知道为什么）。
+        let error = settle_editor_window(
+            Some(VscodeEditorGuard {
+                relaunch: Some(Box::new(|| Err("open 超时".to_string()))),
+            }),
+            Err("同步失败".to_string()),
+        )
+        .unwrap_err();
+        assert!(error.starts_with("同步失败"), "{error}");
+        assert!(error.contains("open 超时"), "{error}");
+    }
+
+    #[test]
+    fn settle_editor_window_is_noop_for_non_plugin_clients() {
+        let report = settle_editor_window(None, Ok(json!({ "synced": [] }))).unwrap();
+        assert!(report.get("restartedEditor").is_none());
+        assert!(report.get("editorError").is_none());
+        assert_eq!(
+            settle_editor_window(None, Err("原错误".to_string())).unwrap_err(),
+            "原错误"
+        );
     }
 
     #[test]

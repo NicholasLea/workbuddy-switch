@@ -5660,13 +5660,6 @@ mod tests {
         assert_eq!(sessions[0]["hasHistory"], false);
     }
 
-    fn temp_db(name: &str) -> PathBuf {
-        std::env::temp_dir().join(format!(
-            "wb_switch_test_{}_{name}.db",
-            uuid::Uuid::new_v4().simple()
-        ))
-    }
-
     #[test]
     fn insert_session_copy_duplicates_row_with_target_uid() {
         let env = ready_env("insert");

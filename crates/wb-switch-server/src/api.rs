@@ -1114,7 +1114,13 @@ async fn api_sync_session_group_pair(Json(body): Json<Value>) -> Response {
             .unwrap_or(""),
         body.get("mode").and_then(Value::as_str).unwrap_or(""),
     );
-    match session_groups::sync_pair(client, scope, args.0, args.1, args.2, args.3, args.4) {
+    let restart = body
+        .get("restart")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    match session_groups::sync_pair(
+        client, scope, args.0, args.1, args.2, args.3, args.4, restart,
+    ) {
         Ok(value) => json_ok(value),
         Err(error) => json_err(error, StatusCode::BAD_REQUEST),
     }
@@ -1141,7 +1147,18 @@ async fn api_sync_session_group_unify(Json(body): Json<Value>) -> Response {
         .get("sourceMemberId")
         .and_then(Value::as_str)
         .unwrap_or("");
-    match session_groups::sync_unify_batch(client, scope, group_id, source_member_id, &targets) {
+    let restart = body
+        .get("restart")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    match session_groups::sync_unify_batch(
+        client,
+        scope,
+        group_id,
+        source_member_id,
+        &targets,
+        restart,
+    ) {
         Ok(value) => json_ok(value),
         Err(error) => json_err(error, StatusCode::BAD_REQUEST),
     }
@@ -1153,7 +1170,11 @@ async fn api_sync_session_group_safe_batch(Json(body): Json<Value>) -> Response 
         Err(error) => return json_err(error, StatusCode::BAD_REQUEST),
     };
     let group_id = body.get("groupId").and_then(Value::as_str).unwrap_or("");
-    match session_groups::sync_safe_batch(client, scope, group_id) {
+    let restart = body
+        .get("restart")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    match session_groups::sync_safe_batch(client, scope, group_id, restart) {
         Ok(value) => json_ok(value),
         Err(error) => json_err(error, StatusCode::BAD_REQUEST),
     }
@@ -1173,7 +1194,11 @@ async fn api_add_session_group_member(Json(body): Json<Value>) -> Response {
             .and_then(Value::as_str)
             .unwrap_or(""),
     );
-    match session_groups::add_member(client, scope, args.0, args.1, args.2) {
+    let restart = body
+        .get("restart")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    match session_groups::add_member(client, scope, args.0, args.1, args.2, restart) {
         Ok(value) => json_ok(value),
         Err(error) => json_err(error, StatusCode::BAD_REQUEST),
     }

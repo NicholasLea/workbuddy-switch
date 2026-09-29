@@ -369,6 +369,10 @@ export interface SessionGroupActionReport {
   needsRecovery?: boolean;
   temporaryFiles?: TemporaryFileInfo[];
   restartedVariants?: WbVariant[];
+  /** 插件侧：本次由 wb-switch 关闭并成功重开了 VS Code。 */
+  restartedEditor?: boolean;
+  /** 插件侧：写入已完成但 VS Code 未能自动重新打开（无 `errors` 数组的入口用它兜底）。 */
+  editorError?: string;
 }
 
 /**
