@@ -730,7 +730,18 @@ export interface CodeBuddyCliStatus {
   helperSupportsAccountIds: boolean;
   helperCurrent?: boolean;
   migrationRequired?: boolean;
+  /**
+   * 需要用户介入的脱节：settings.json 里的 Token 已长期匹配不上账号库。
+   *
+   * 与 `syncInProgress` 互斥。保活刷新造成的短暂不一致不算脱节。
+   */
   syncPending?: boolean;
+  /**
+   * 保活刷新刚换完账号库的 Token、settings.json 尚未同步的正常中间态。
+   *
+   * 仅在账号库 mtime 落在同步宽限窗口内时为真；此时不该提示用户点「更新认证」。
+   */
+  syncInProgress?: boolean;
   activeIndex: number | null;
   activeAccountId: string | null;
   activeAccountName: string | null;

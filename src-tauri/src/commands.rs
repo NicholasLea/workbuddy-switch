@@ -88,10 +88,14 @@ pub async fn get_codebuddy_cli_status() -> Result<Value, String> {
 
 /// POST /api/codebuddy-cli/install-helper —— 显式安装/升级 CLI helper。
 #[tauri::command]
-pub async fn install_codebuddy_cli_helper() -> Result<Value, String> {
-    tauri::async_runtime::spawn_blocking(codebuddy_cli::install_helper)
+pub async fn install_codebuddy_cli_helper(app: tauri::AppHandle) -> Result<Value, String> {
+    let result = tauri::async_runtime::spawn_blocking(codebuddy_cli::install_helper)
         .await
-        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())??;
+    // 写入 settings.json 与随后的状态重算之间存在短暂窗口，让前端立即重读，
+    // 避免把「刚写完、正在校验」误显示为脱节。
+    crate::notify_codebuddy_cli_updated(&app);
+    Ok(result)
 }
 
 /// POST /api/codebuddy-cli/switch —— 只切换 CodeBuddy CLI，不重启 WorkBuddy。
@@ -105,6 +109,7 @@ pub async fn install_codebuddy_cli_helper() -> Result<Value, String> {
 /// 校验账号（子进程无超时），同步 command 会阻塞主线程造成 UI 卡顿。
 #[tauri::command(rename_all = "camelCase")]
 pub async fn switch_codebuddy_cli_account(
+    app: tauri::AppHandle,
     account_id: String,
     close_running_cli: Option<bool>,
 ) -> Result<Value, String> {
@@ -112,9 +117,13 @@ pub async fn switch_codebuddy_cli_account(
         return Err("缺少 accountId".to_string());
     }
     let _ = close_running_cli;
-    tauri::async_runtime::spawn_blocking(move || codebuddy_cli::switch_active_account(&account_id))
-        .await
-        .map_err(|e| e.to_string())?
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        codebuddy_cli::switch_active_account(&account_id)
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    crate::notify_codebuddy_cli_updated(&app);
+    Ok(result)
 }
 
 /// GET /api/codebuddy-cn-ide/status —— CodeBuddy IDE 安装/运行/当前账号。
