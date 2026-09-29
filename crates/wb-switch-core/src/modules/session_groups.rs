@@ -915,6 +915,43 @@ fn remove_member_in(
     Ok((group_removed, remaining))
 }
 
+/// 删除整个会话组：组内所有成员一起解除关联，只解除管理关系，不删除账号内的会话内容。
+pub fn delete_group(
+    client: SessionClient,
+    scope: Option<WbVariant>,
+    group_id: &str,
+) -> Result<Value, String> {
+    client.validate_scope(scope)?;
+    let paths = client.store_paths();
+    // 单次存储锁内完成读改写：失败不写盘、不推进 revision（`with_link_store_write` 契约）。
+    let removed = session_link::with_link_store_write(&paths, |store| {
+        delete_group_in(store, client, scope, group_id)
+    })?;
+    Ok(json!({
+        "status": "groupRemoved",
+        "client": client.as_str(),
+        "groupId": group_id,
+        "removed": removed,
+    }))
+}
+
+/// [`delete_group`] 的纯变更部分：与存储 IO 分离，便于用固定夹具覆盖不变量。
+fn delete_group_in(
+    store: &mut crate::modules::session_link::LinkStore,
+    client: SessionClient,
+    scope: Option<WbVariant>,
+    group_id: &str,
+) -> Result<usize, String> {
+    let removed = store
+        .groups
+        .iter()
+        .find(|group| group.id == group_id && group_is_in_scope(client, scope, group))
+        .map(|group| group.members.len())
+        .ok_or_else(|| "会话关联组不存在或不属于当前客户端".to_string())?;
+    store.groups.retain(|group| group.id != group_id);
+    Ok(removed)
+}
+
 #[derive(Debug, Clone)]
 struct PairContext {
     group: LinkGroup,
@@ -2287,6 +2324,12 @@ mod tests {
         })
     }
 
+    fn delete_group_at(paths: &SessionPaths, group_id: &str) -> Result<usize, String> {
+        session_link::with_link_store_write(paths, |store| {
+            super::delete_group_in(store, SessionClient::Workbuddy, None, group_id)
+        })
+    }
+
     #[test]
     fn removing_a_member_drops_its_pair_bases_and_keeps_the_rest() {
         let store = TempStore::new("remove-member");
@@ -2446,6 +2489,82 @@ mod tests {
         assert_eq!(saved.revision, 1);
         assert_eq!(saved.groups[0].members.len(), 1);
         assert!(session_link::validate_store(&saved).is_ok());
+    }
+
+    #[test]
+    fn deleting_a_group_drops_all_members_and_keeps_the_others() {
+        let store = TempStore::new("delete-group");
+        let mut group = LinkGroup {
+            id: "g-1".to_string(),
+            variant: WbVariant::Cn,
+            created_at: 1,
+            members: vec![
+                stored_member("m-a", "uid-a", MemberState::Active),
+                stored_member("m-b", "uid-b", MemberState::Stale),
+            ],
+            pair_bases: Vec::new(),
+        };
+        let (first, second) = session_link::pair_key("m-a", "m-b");
+        group
+            .pair_bases
+            .push(crate::modules::session_link::PairBase {
+                member_ids: [first, second],
+                baseline_ref: "base-ab".to_string(),
+                normalization_version: 1,
+            });
+        store.seed(vec![
+            group,
+            LinkGroup {
+                id: "g-2".to_string(),
+                variant: WbVariant::Cn,
+                created_at: 1,
+                members: vec![stored_member("m-z", "uid-z", MemberState::Active)],
+                pair_bases: Vec::new(),
+            },
+        ]);
+
+        let removed = delete_group_at(&store.paths, "g-1").unwrap();
+
+        assert_eq!(removed, 2);
+        let saved = store.store();
+        assert_eq!(saved.groups.len(), 1);
+        assert_eq!(saved.groups[0].id, "g-2");
+        assert_eq!(saved.groups[0].members.len(), 1);
+        assert_eq!(saved.revision, 2);
+        assert!(session_link::validate_store(&saved).is_ok());
+    }
+
+    #[test]
+    fn deleting_an_unknown_group_reports_a_readable_error_without_writing() {
+        let store = TempStore::new("delete-unknown");
+        store.seed(vec![LinkGroup {
+            id: "g-1".to_string(),
+            variant: WbVariant::Cn,
+            created_at: 1,
+            members: vec![stored_member("m-a", "uid-a", MemberState::Active)],
+            pair_bases: Vec::new(),
+        }]);
+
+        let error = delete_group_at(&store.paths, "missing").unwrap_err();
+
+        assert_eq!(error, "会话关联组不存在或不属于当前客户端");
+        // 失败的读改写不得落盘，更不得推进 revision。
+        let saved = store.store();
+        assert_eq!(saved.revision, 1);
+        assert_eq!(saved.groups.len(), 1);
+        assert!(session_link::validate_store(&saved).is_ok());
+    }
+
+    #[test]
+    fn delete_group_rejects_invalid_scope_combinations() {
+        let vscode =
+            delete_group(SessionClient::VscodeExt, Some(WbVariant::Ai), "g-1").unwrap_err();
+        assert!(vscode.contains("只有 CodeBuddy IDE"));
+        let workbuddy =
+            delete_group(SessionClient::Workbuddy, Some(WbVariant::Cn), "g-1").unwrap_err();
+        assert!(workbuddy.contains("只有 CodeBuddy IDE"));
+        let ide = delete_group(SessionClient::CodebuddyIde, None, "g-1").unwrap_err();
+        assert!(ide.contains("必须指定 cn 或 ai"));
     }
 
     #[test]

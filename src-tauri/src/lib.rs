@@ -235,6 +235,7 @@ pub fn run() {
             commands::copy_linked_sessions,
             commands::vscode_restart_precheck,
             commands::unlink_session_group_member,
+            commands::delete_session_group,
             commands::open_permission_settings,
             commands::check_auth_permission,
             commands::reveal_app_in_finder,

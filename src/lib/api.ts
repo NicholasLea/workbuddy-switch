@@ -159,6 +159,7 @@ const ROUTES: Record<string, Route> = {
   copy_linked_sessions: { method: "POST", path: "/api/session-groups/copy-linked" },
   vscode_restart_precheck: { method: "POST", path: "/api/vscode-ext/restart-precheck" },
   unlink_session_group_member: { method: "POST", path: "/api/session-groups/unlink" },
+  delete_session_group: { method: "POST", path: "/api/session-groups/delete" },
   get_checkin_status: { method: "GET", path: "/api/checkin/status" },
   get_credit_expiry: { method: "POST", path: "/api/credits" },
   get_credit_statistics: { method: "GET", path: "/api/credits/stats" },
@@ -699,6 +700,18 @@ export function unlinkSessionGroupMember(args: {
 }): Promise<{ status: "removed" | "groupRemoved"; client: SessionGroupClient; groupId: string; memberId: string; remaining: number }> {
   if (demoModeEnabled) return Promise.reject(new Error(DEMO_UNAVAILABLE_MESSAGE));
   return call("unlink_session_group_member", args as unknown as Record<string, unknown>);
+}
+
+/**
+ * 删除会话组：组内所有成员一起解除关联（只解除管理关系，不删除账号内的会话内容）。
+ */
+export function deleteSessionGroup(args: {
+  client: SessionGroupClient;
+  groupId: string;
+  variantScope?: WbVariant;
+}): Promise<{ status: "groupRemoved"; client: SessionGroupClient; groupId: string; removed: number }> {
+  if (demoModeEnabled) return Promise.reject(new Error(DEMO_UNAVAILABLE_MESSAGE));
+  return call("delete_session_group", args as unknown as Record<string, unknown>);
 }
 
 /** 打开系统设置授权面板（桌面端专用；webui 模式由服务进程权限决定，无操作）。 */

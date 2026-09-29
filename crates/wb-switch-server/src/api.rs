@@ -165,6 +165,7 @@ pub fn router() -> Router {
             "/api/session-groups/unlink",
             post(api_unlink_session_group_member),
         )
+        .route("/api/session-groups/delete", post(api_delete_session_group))
         .route(
             "/api/session-groups/copy-linked",
             post(api_copy_linked_sessions),
@@ -1298,6 +1299,19 @@ async fn api_unlink_session_group_member(Json(body): Json<Value>) -> Response {
     let group_id = body.get("groupId").and_then(Value::as_str).unwrap_or("");
     let member_id = body.get("memberId").and_then(Value::as_str).unwrap_or("");
     match session_groups::remove_member(client, scope, group_id, member_id) {
+        Ok(value) => json_ok(value),
+        Err(error) => json_err(error, StatusCode::BAD_REQUEST),
+    }
+}
+
+/// 删除会话组：组内所有成员一起解除关联，只解除管理关系，不触碰账号内的会话内容。
+async fn api_delete_session_group(Json(body): Json<Value>) -> Response {
+    let (client, scope) = match session_group_request(&body) {
+        Ok(value) => value,
+        Err(error) => return json_err(error, StatusCode::BAD_REQUEST),
+    };
+    let group_id = body.get("groupId").and_then(Value::as_str).unwrap_or("");
+    match session_groups::delete_group(client, scope, group_id) {
         Ok(value) => json_ok(value),
         Err(error) => json_err(error, StatusCode::BAD_REQUEST),
     }
