@@ -1,7 +1,7 @@
-import { lazy, Suspense, useState } from "react";
+import { useState } from "react";
 import { toast } from "sonner";
 import { BrowserRouter, HashRouter, Navigate, NavLink, Outlet, Route, Routes } from "react-router-dom";
-import { ArrowLeftRight, ArrowUp, Loader2, MessagesSquare, Play, Settings, Sparkles, User } from "lucide-react";
+import { ArrowUp, Link2, Loader2, MessagesSquare, Play, Settings, Sparkles, User } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 import * as api from "@/lib/api";
@@ -27,8 +27,6 @@ import { useRotateDeferredNotice } from "@/lib/use-rotate-deferred-notice";
 import { useUpdateState } from "@/lib/use-update-state";
 import { useWorkbuddyStatusRefresh } from "@/lib/use-workbuddy-status-refresh";
 import { useAccountsStore } from "@/stores/accounts";
-
-const DialogMotionLab = import.meta.env.DEV ? lazy(() => import("@/components/dev/dialog-motion-lab")) : null;
 
 /**
  * 悬浮窗面板：从 footer 向上滑出，开关与设置同屏。
@@ -288,8 +286,8 @@ function Layout() {
               )
             }
           >
-            <ArrowLeftRight className="size-4" />
-            会话管理
+            <Link2 className="size-4" />
+            关联会话
           </NavLink>
           <NavLink to="/token-stats" className={({ isActive }) => cn("flex items-center gap-2.5 rounded-lg px-3 py-2.5 text-sm outline-none transition-colors", isActive ? "bg-foreground/[0.06] font-medium text-foreground" : "text-muted-foreground hover:bg-foreground/[0.04] hover:text-foreground")}><MessagesSquare className="size-4" />Token 统计</NavLink>
           <NavLink
@@ -352,7 +350,6 @@ export default function App() {
           </Route>
         </Routes>
         <Toaster />
-        {DialogMotionLab && <Suspense fallback={null}><DialogMotionLab /></Suspense>}
       </Router>
     </TooltipProvider>
   );
