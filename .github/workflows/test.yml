@@ -113,3 +113,8 @@ jobs:
       # server 的 8 个测试此前从不运行（rust-tests 只覆盖 core）。
       - name: Server tests
         run: cargo test -p wb-switch-server
+
+      # src-tauri 的 40 个测试此前从不运行（rust-tests 只覆盖 core）。
+      # 前置 dist 与 stub companion binary 已由上方步骤就位。
+      - name: Desktop app tests
+        run: cargo test -p wb-switch-rust
