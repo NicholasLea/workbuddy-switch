@@ -12,6 +12,7 @@
     "build": "node scripts/prepare-companion-demo.mjs clean && tsc && vite build",
     "build:desktop": "node scripts/prepare-agent-companion.mjs build && npm run build && node scripts/prepare-agent-companion.mjs copy",
     "build:demo": "node scripts/prepare-companion-demo.mjs build && tsc && VITE_DEMO_MODE=1 VITE_PAGES_DEMO=1 vite build && node scripts/prepare-companion-demo.mjs copy",
+    "test": "vitest run",
     "preview": "vite preview",
     "tauri": "tauri",
     "build:app": "TAURI_SIGNING_PRIVATE_KEY=\"$(cat \"$HOME/.wb-switch/wb-switch-updater.key\")\" TAURI_SIGNING_PRIVATE_KEY_PASSWORD=wb-switch-dev npm run tauri build -- --debug --bundles app; sh scripts/fix-app.sh",
@@ -60,6 +61,7 @@
     "@vitejs/plugin-react": "^4.6.0",
     "tailwindcss": "^4.3.3",
     "typescript": "~5.8.3",
-    "vite": "^7.0.4"
+    "vite": "^7.0.4",
+    "vitest": "^5.0.2"
   }
 }
