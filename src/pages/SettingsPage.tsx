@@ -78,7 +78,7 @@ const ACCORDION_DIVIDER =
 
 function SettingsGroup({ id, title, children }: SettingsGroupProps) {
   return (
-    <section className="min-w-0 space-y-2.5" aria-labelledby={id}>
+    <section className="min-w-0 space-y-3" aria-labelledby={id}>
       <div className="px-1">
         <h2 id={id} className="text-[13px] font-medium leading-5">
           {title}
@@ -93,7 +93,7 @@ function SettingsRow({ children, className }: { children: ReactNode; className?:
   return (
     <div
       className={cn(
-        "mx-4 flex min-w-0 items-center justify-between gap-3 border-b border-border/50 px-0 py-2.5 sm:mx-5",
+        "mx-4 flex min-w-0 items-center justify-between gap-3 border-b border-border/50 px-0 py-3.5 sm:mx-5",
         className,
       )}
     >
@@ -130,7 +130,7 @@ function SettingsFieldRow({
           <div className="text-[13px] font-medium leading-4">{label}</div>
         )}
         {description && (
-          <p className="mt-0.5 text-xs leading-4 text-muted-foreground/75">{description}</p>
+          <p className="mt-1 text-xs leading-4 text-muted-foreground/75">{description}</p>
         )}
       </div>
       <div className="flex min-w-0 w-full shrink-0 justify-end sm:w-auto">
@@ -174,7 +174,7 @@ function AccordionSettingsRow({
     <AccordionItem value={value} className={cn("relative", divider && ACCORDION_DIVIDER)}>
       <div
         className={cn(
-          "relative mx-4 flex min-w-0 flex-col items-stretch justify-between gap-2 py-2.5 sm:mx-5 sm:flex-row sm:items-center",
+          "relative mx-4 flex min-w-0 flex-col items-stretch justify-between gap-2 py-3.5 sm:mx-5 sm:flex-row sm:items-center",
           actions ? "sm:pr-7" : undefined,
         )}
       >
@@ -182,7 +182,7 @@ function AccordionSettingsRow({
           <div className="min-w-0 flex-1">
             <div className="text-[13px] font-medium leading-4">{label}</div>
             {description && (
-              <p className="mt-0.5 text-xs leading-4 text-muted-foreground/75">{description}</p>
+              <p className="mt-1 text-xs leading-4 text-muted-foreground/75">{description}</p>
             )}
           </div>
           {actions && (
@@ -726,7 +726,7 @@ function AutoCheckinCard() {
                       return (
                         <div
                           key={account.id}
-                          className="flex min-w-0 items-center justify-between gap-3 border-b border-border/50 py-2.5 last:border-b-0"
+                          className="flex min-w-0 items-center justify-between gap-3 border-b border-border/50 py-3 last:border-b-0"
                         >
                           <span className="min-w-0 flex-1 truncate text-xs leading-4" title={name}>
                             {name}
