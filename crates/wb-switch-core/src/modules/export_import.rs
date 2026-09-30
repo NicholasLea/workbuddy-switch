@@ -92,6 +92,17 @@ fn merge_import_record(accounts: &mut Vec<Value>, item: &Value) -> MergeOutcome 
             .find(|a| account::get_str(a, "uid").as_deref() == Some(uid))
         {
             let mut replaced = item.clone();
+            // 本地展示字段（备注 / 显示选择）：备份未携带时保留本地值；
+            // 备份自带则以备份为准（导入即恢复用户当时的展示配置）。
+            if let Some(obj) = replaced.as_object_mut() {
+                for key in ["note", "displayField"] {
+                    if !obj.contains_key(key) {
+                        if let Some(v) = existing.get(key) {
+                            obj.insert(key.to_string(), v.clone());
+                        }
+                    }
+                }
+            }
             // 账号库不允许出现无 id 记录（删除按 id、列表 key、导出选择都依赖
             // id）：优先保留本地 id；本地也是无 id 的历史脏数据时补一个。
             if account::get_str(&replaced, "id").is_none() {
@@ -602,5 +613,35 @@ mod tests {
         let records = vec![record("a1", Some("u1"), "甲", None, true)];
         assert!(write_records_to_file(&dir, &records, "../escape.json").is_err());
         assert!(write_records_to_file(&dir, &records, "no-ext").is_err());
+    }
+
+    /// 导入备份：记录未携带本地展示字段（备注 / 显示选择）时保留本地值。
+    #[test]
+    fn merge_preserves_local_display_fields_when_absent() {
+        let mut local = record("local", Some("u1"), "旧名称", None, true);
+        local["note"] = json!("本地备注");
+        local["displayField"] = json!("note");
+        let mut accounts = vec![local];
+
+        let text = r#"[{ "uid": "u1", "nickname": "新名称", "access_token": "tok-new" }]"#;
+        merge_import_records(&mut accounts, text, &[0]).unwrap();
+        assert_eq!(accounts[0]["note"], "本地备注");
+        assert_eq!(accounts[0]["displayField"], "note");
+        assert_eq!(accounts[0]["nickname"], "新名称");
+    }
+
+    /// 导入备份：记录自带展示字段时以导入为准（导入即恢复当时的展示配置）。
+    #[test]
+    fn merge_uses_imported_display_fields_when_present() {
+        let mut local = record("local", Some("u1"), "旧名称", None, true);
+        local["note"] = json!("本地备注");
+        local["displayField"] = json!("note");
+        let mut accounts = vec![local];
+
+        let text = r#"[{ "uid": "u1", "nickname": "新名称", "access_token": "tok-new",
+            "note": "备份备注", "displayField": "phone" }]"#;
+        merge_import_records(&mut accounts, text, &[0]).unwrap();
+        assert_eq!(accounts[0]["note"], "备份备注");
+        assert_eq!(accounts[0]["displayField"], "phone");
     }
 }

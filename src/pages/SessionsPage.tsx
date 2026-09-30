@@ -16,6 +16,7 @@ import { DialogAutoHeight } from "@/components/ui/dialog-auto-height";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { displayName } from "@/lib/account-display";
 import * as api from "@/lib/api";
 import type { AccountMeta, Session, SessionGroupClient, SessionGroupCurrentAccount, SessionGroupDetail, SessionGroupMemberDetail, SessionGroupSummary, SessionGroupUnifyPlan, SessionSyncMode, WbVariant } from "@/lib/types";
 import { accountVariant, variantLabel } from "@/lib/variant";
@@ -600,10 +601,6 @@ function ClientMark({ client, variantScope }: { client: SessionGroupClient; vari
   return <VscodeExtMark size={34} className="text-foreground" />;
 }
 
-function accountLabel(account: AccountMeta): string {
-  return account.nickname || account.email || account.uid || account.id;
-}
-
 /** 会话树区最小高度：加载态、空态与列表共用同一下沿，避免弹窗高度跳变。 */
 const LINKED_TREE_MIN_H = "min-h-[min(10rem,30vh)]";
 
@@ -763,7 +760,7 @@ function AddLinkedSessionDialog({ client, disabled, onDone, requestRestartConfir
         sessionIds: [...selected],
         restart,
       });
-      const targetName = targetAccount ? accountLabel(targetAccount) : "目标账号";
+      const targetName = targetAccount ? displayName(targetAccount) : "目标账号";
       const status = String(report.status);
       const skipped = Array.isArray(report.skipped) ? report.skipped : [];
       const copiedCount = (report.report as { copied?: unknown[] } | undefined)?.copied?.length ?? 0;
@@ -803,7 +800,7 @@ function AddLinkedSessionDialog({ client, disabled, onDone, requestRestartConfir
       const copied = report.copied?.length ?? 0;
       const alreadyLinked = report.alreadyLinked?.length ?? 0;
       const errors = report.errors ?? [];
-      const targetName = targetAccount ? accountLabel(targetAccount) : "目标账号";
+      const targetName = targetAccount ? displayName(targetAccount) : "目标账号";
       // 同一份报告可能同时含已复制、已存在与失败项：各分支各自提示，互不隐藏。
       if (copied > 0) toast.success(`已复制 ${copied} 个会话到「${targetName}」并建立关联`);
       if (alreadyLinked > 0) toast.info(`「${targetName}」已存在 ${alreadyLinked} 个会话的副本，未重复复制`);
@@ -842,8 +839,8 @@ function AddLinkedSessionDialog({ client, disabled, onDone, requestRestartConfir
     : !targetAccount
       ? "再选择目标账号"
       : selected.size > 0
-        ? `复制并关联到「${accountLabel(targetAccount)}」`
-        : `勾选要复制到「${accountLabel(targetAccount)}」的会话`;
+        ? `复制并关联到「${displayName(targetAccount)}」`
+        : `勾选要复制到「${displayName(targetAccount)}」的会话`;
   return <Dialog open={open} onOpenChange={openChange}>
     <span className="inline-flex" title={supported ? undefined : unsupportedTitle}>
       <DialogTrigger asChild>
@@ -864,7 +861,7 @@ function AddLinkedSessionDialog({ client, disabled, onDone, requestRestartConfir
         <div className="min-w-0 space-y-1.5"><p className="text-xs font-medium">来源账号</p>
           <Select value={sourceAccountId} onValueChange={changeSource} disabled={busy}>
             <SelectTrigger size="sm" className="w-full min-w-0 bg-background text-xs" aria-label="选择来源账号"><SelectValue placeholder={`选择${clientAccountLabel}`} /></SelectTrigger>
-            <SelectContent>{workbuddyAccounts.map((account) => <SelectItem key={account.id} value={account.id} className="text-xs">{accountLabel(account)} · {variantLabel(accountVariant(account))}</SelectItem>)}</SelectContent>
+            <SelectContent>{workbuddyAccounts.map((account) => <SelectItem key={account.id} value={account.id} className="text-xs">{displayName(account)} · {variantLabel(accountVariant(account))}</SelectItem>)}</SelectContent>
           </Select>
           {workbuddyAccounts.length === 0 && <p className="text-xs text-muted-foreground">账号库里还没有{clientAccountLabel}。</p>}
         </div>
@@ -890,7 +887,7 @@ function AddLinkedSessionDialog({ client, disabled, onDone, requestRestartConfir
         <div className="min-w-0 space-y-1.5"><p className="text-xs font-medium">目标账号</p>
           <Select value={targetAccountId} onValueChange={setTargetAccountId} disabled={busy || !sourceAccountId || targetOptions.length === 0}>
             <SelectTrigger size="sm" className="w-full min-w-0 bg-background text-xs" aria-label="选择目标账号"><SelectValue placeholder={sourceAccountId ? "选择目标账号" : "先选择来源账号"} /></SelectTrigger>
-            <SelectContent>{targetOptions.map((account) => <SelectItem key={account.id} value={account.id} className="text-xs">{accountLabel(account)} · {variantLabel(accountVariant(account))}</SelectItem>)}</SelectContent>
+            <SelectContent>{targetOptions.map((account) => <SelectItem key={account.id} value={account.id} className="text-xs">{displayName(account)} · {variantLabel(accountVariant(account))}</SelectItem>)}</SelectContent>
           </Select>
         </div>
       </div>

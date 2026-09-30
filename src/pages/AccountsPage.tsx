@@ -15,6 +15,7 @@ import {
 } from "lucide-react";
 
 import { AccountCard } from "@/components/account-card";
+import { AccountInfoDialog } from "@/components/account-info-dialog";
 import { JetbrainsSwitchDialog } from "@/components/jetbrains-switch-dialog";
 import { CodebuddyIdeSwitchAccountDialog } from "@/components/codebuddy-ide-switch-account-dialog";
 import { DemoAction } from "@/components/demo-action";
@@ -61,6 +62,7 @@ import {
 } from "@/lib/variant";
 import { useSupportedTools } from "@/lib/supported-tools";
 import type { AccountMeta, AppStatus, CheckinConfig, CodeBuddyCliStatus, CodeBuddyCnIdeStatus, CreditExpiry, JetbrainsStatus, RateLimitEntry, TravelConfig, TravelStatus, VscodeExtStatus } from "@/lib/types";
+import { displayName } from "@/lib/account-display";
 import { cn } from "@/lib/utils";
 import { useAccountsStore } from "@/stores/accounts";
 
@@ -185,6 +187,8 @@ export default function AccountsPage() {
   const [exportOpen, setExportOpen] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
   const [switchAccount, setSwitchAccount] = useState<AccountMeta | null>(null);
+  /** 「账号信息」弹框目标账号（查看信息 / 编辑备注 / 选择显示字段）。 */
+  const [infoTarget, setInfoTarget] = useState<AccountMeta | null>(null);
   const [importing, setImporting] = useState(false);
   /**
    * 自动签到配置（只读）：只用于决定账号卡片是否展示「自动签到已关闭」chip，
@@ -624,7 +628,7 @@ export default function AccountsPage() {
           : res.result === "already"
             ? "今天已签到"
             : "签到失败";
-      const description = `${a.nickname || a.email || a.id}${res.error ? `：${res.error}` : ""}`;
+      const description = `${displayName(a)}${res.error ? `：${res.error}` : ""}`;
       if (res.result === "error") toast.error(label, { description });
       else toast.success(label, { description });
       // 手动签到已完成状态核验，直接使用回执，避免为已关闭账号再触发展示查询。
@@ -642,7 +646,7 @@ export default function AccountsPage() {
   async function onRefresh(a: AccountMeta) {
     try {
       const res = await api.refreshAccountToken(a.id);
-      const label = a.nickname || a.email || a.id;
+      const label = displayName(a);
       if (res.needsRelogin) {
         toast.error("Token 刷新失败", { description: `${label}：需重新登录${res.needsReloginReason ? `（${res.needsReloginReason}）` : ""}` });
       } else {
@@ -724,7 +728,7 @@ export default function AccountsPage() {
     setCliSwitchTarget(null);
     setCodebuddyCliSwitchingId(account.id);
     const toastId = toast.loading("正在切换 CodeBuddy CLI…", {
-      description: `正在将默认账号设为 ${account.nickname || account.email || account.id}`,
+      description: `正在将默认账号设为 ${displayName(account)}`,
     });
     try {
       // 后端一律先关闭正在运行的 CLI 再写状态（`closeRunningCli` 入参已废弃）。
@@ -732,7 +736,7 @@ export default function AccountsPage() {
       await refreshCodebuddyCliStatus();
       toast.success("CodeBuddy CLI 默认账号已更新", {
         id: toastId,
-        description: `${account.nickname || account.email || account.id}：${result.message || "配置已更新"}`,
+        description: `${displayName(account)}：${result.message || "配置已更新"}`,
       });
     } catch (error) {
       toast.error("CodeBuddy CLI 切换失败", {
@@ -798,12 +802,8 @@ export default function AccountsPage() {
       ? orderedAccounts.find((account) => hasExpiringSoonCredits(creditMap[account.id]))?.id
       : undefined;
   const cliCurrentAccountId = codebuddyCli?.activeAccountId;
-  const cliSwitchAccountLabel = cliSwitchTarget
-    ? cliSwitchTarget.nickname || cliSwitchTarget.email || cliSwitchTarget.id
-    : "";
-  const workbuddyCurrentName = current
-    ? current.nickname || current.email || current.uid || "未知账号"
-    : "未登录";
+  const cliSwitchAccountLabel = cliSwitchTarget ? displayName(cliSwitchTarget) : "";
+  const workbuddyCurrentName = current ? displayName(current) : "未登录";
   const codebuddyCurrentName = codebuddyCli?.configured
     ? codebuddyCli.activeAccountName || "未检测到"
     : "尚未接入";
@@ -1111,6 +1111,7 @@ export default function AccountsPage() {
                 compact={compact}
                 onDelete={onDelete}
                 onSwitch={setSwitchAccount}
+                onShowInfo={setInfoTarget}
                 onCheckin={checkinAvailable ? onCheckin : undefined}
                 onRefresh={onRefresh}
                 todayCheckedIn={checkinMap[a.id]}
@@ -1174,6 +1175,16 @@ export default function AccountsPage() {
           void fetchAll();
           void refreshCodebuddyCliStatus();
           void refreshCodebuddyCnIdeStatus();
+        }}
+      />
+      <AccountInfoDialog
+        open={infoTarget !== null}
+        onOpenChange={(o) => {
+          if (!o) setInfoTarget(null);
+        }}
+        account={infoTarget}
+        onSaved={() => {
+          void fetchAll();
         }}
       />
       <CodebuddyIdeSwitchAccountDialog
@@ -1277,7 +1288,7 @@ export default function AccountsPage() {
           <DialogHeader>
             <DialogTitle>删除账号</DialogTitle>
             <DialogDescription>
-              确定删除账号「{deleteTarget?.nickname || deleteTarget?.email || deleteTarget?.id}」？
+              确定删除账号「{deleteTarget ? displayName(deleteTarget) : ""}」？
               此操作不可撤销。
             </DialogDescription>
           </DialogHeader>

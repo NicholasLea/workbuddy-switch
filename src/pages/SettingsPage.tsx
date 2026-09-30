@@ -30,6 +30,7 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { TimePicker } from "@/components/ui/time-picker";
+import { displayName } from "@/lib/account-display";
 import * as api from "@/lib/api";
 import { canPersistErrorLog } from "@/lib/error-report";
 import { setSessionsNavEnabled, useSessionsNavEnabled } from "@/lib/nav-prefs";
@@ -721,7 +722,7 @@ function AutoCheckinCard() {
                     <p className="py-2 text-xs text-muted-foreground">暂无可签到的账号</p>
                   ) : (
                     checkinAccounts.map((account) => {
-                      const name = account.nickname || account.email || account.uid || account.id;
+                      const name = displayName(account);
                       return (
                         <div
                           key={account.id}
