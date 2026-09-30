@@ -13,6 +13,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import * as api from "@/lib/api";
 import { accountVariant, variantLabel } from "@/lib/variant";
 import type { AccountMeta, DisplayField } from "@/lib/types";
@@ -43,6 +44,8 @@ export function AccountInfoDialog({ open, onOpenChange, account, onSaved }: Prop
   const [note, setNote] = useState("");
   const [field, setField] = useState<DisplayField>("nickname");
   const [busy, setBusy] = useState(false);
+  // 关闭时父组件会清空 account：保留最后一次的账号继续渲染，让退出动画播完再卸载。
+  const [snapshot, setSnapshot] = useState<AccountMeta | null>(null);
 
   // 每次打开按目标账号重置草稿状态。
   useEffect(() => {
@@ -53,20 +56,25 @@ export function AccountInfoDialog({ open, onOpenChange, account, onSaved }: Prop
     }
   }, [open, account]);
 
-  if (!account) return null;
+  useEffect(() => {
+    if (account) setSnapshot(account);
+  }, [account]);
+
+  const current = account ?? snapshot;
+  if (!current) return null;
 
   // 闭包内收窄：函数参数在闭包里不被 TS 收窄，先取到局部常量。
-  const accountId = account.id;
-  const hasPhone = Boolean(account.phoneNumber);
+  const accountId = current.id;
+  const hasPhone = Boolean(current.phoneNumber);
   // 手机号不可用时回退账号名（含用户此前选择 phone 的存量数据）。
   const effectiveField: DisplayField = field === "phone" && !hasPhone ? "nickname" : field;
 
   const infoRows: Array<[string, string | null]> = [
-    ["账号名", account.nickname],
-    ["手机号", account.phoneNumber ?? null],
-    ["企业名", account.enterpriseName],
-    ["UID", account.uid],
-    ["档位", variantLabel(accountVariant(account))],
+    ["账号名", current.nickname],
+    ["手机号", current.phoneNumber ?? null],
+    ["企业名", current.enterpriseName],
+    ["UID", current.uid],
+    ["档位", variantLabel(accountVariant(current))],
   ];
 
   async function save() {
@@ -119,31 +127,35 @@ export function AccountInfoDialog({ open, onOpenChange, account, onSaved }: Prop
 
           <div className="space-y-1.5">
             <Label>卡片显示</Label>
-            <div className="grid grid-cols-3 gap-2">
-              {FIELD_OPTIONS.map((opt) => {
-                const disabled = opt.value === "phone" && !hasPhone;
-                return (
-                  <Button
-                    key={opt.value}
-                    type="button"
-                    size="sm"
-                    variant={effectiveField === opt.value ? "default" : "outline"}
-                    disabled={disabled}
-                    aria-pressed={effectiveField === opt.value}
-                    onClick={() => setField(opt.value)}
-                  >
-                    {opt.label}
-                  </Button>
-                );
-              })}
-            </div>
+            <ToggleGroup
+              type="single"
+              value={effectiveField}
+              onValueChange={(value) => {
+                // type="single" 点击已选中项会回传空串；显示字段必须保留一项。
+                if (value) setField(value as DisplayField);
+              }}
+              variant="outline"
+              size="sm"
+              className="w-full"
+            >
+              {FIELD_OPTIONS.map((opt) => (
+                <ToggleGroupItem
+                  key={opt.value}
+                  value={opt.value}
+                  disabled={opt.value === "phone" && !hasPhone}
+                  className="grow basis-0"
+                >
+                  {opt.label}
+                </ToggleGroupItem>
+              ))}
+            </ToggleGroup>
             {!hasPhone && (
               <p className="text-xs text-muted-foreground">该账号没有手机号，无法按手机号显示。</p>
             )}
           </div>
         </div>
 
-        <DialogFooter>
+        <DialogFooter className="mt-3">
           <Button variant="outline" disabled={busy} onClick={() => onOpenChange(false)}>
             取消
           </Button>
