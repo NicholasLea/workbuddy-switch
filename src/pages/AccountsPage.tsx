@@ -3,7 +3,6 @@ import { listen } from "@tauri-apps/api/event";
 import { toast } from "sonner";
 import {
   Columns3,
-  Download,
   ExternalLink,
   FileDown,
   FileUp,
@@ -49,7 +48,6 @@ import { VscodeSwitchAccountDialog } from "@/components/vscode-switch-account-di
 import * as api from "@/lib/api";
 import { useVisibleInterval } from "@/lib/use-visible-interval";
 import {
-  DEFAULT_VARIANT,
   accountVariant,
   normalizeVariant,
   variantAppName,
@@ -175,7 +173,6 @@ export default function AccountsPage() {
     error,
     fetchAll,
     deleteAccount,
-    importLocal,
     creditMap,
     creditLoadingMap,
     creditUpdatedAtMap,
@@ -189,7 +186,6 @@ export default function AccountsPage() {
   const [switchAccount, setSwitchAccount] = useState<AccountMeta | null>(null);
   /** 「账号信息」弹框目标账号（查看信息 / 编辑备注 / 选择显示字段）。 */
   const [infoTarget, setInfoTarget] = useState<AccountMeta | null>(null);
-  const [importing, setImporting] = useState(false);
   /**
    * 自动签到配置（只读）：只用于决定账号卡片是否展示「自动签到已关闭」chip，
    * 以及状态查询、刷新时跳过哪些账号。控制入口在设置页。
@@ -306,22 +302,6 @@ export default function AccountsPage() {
       cancelled = true;
     };
   }, []);
-
-  /**
-   * 首次启动自动导入本机账号（本会话只尝试一次，无本机账号时静默）。
-   * 仅限默认档位：切到国际版时不静默写入账号，改由空状态引导显式导入或浏览器授权登录。
-   */
-  const autoImportTried = useRef(false);
-  useEffect(() => {
-    if (variant !== DEFAULT_VARIANT) return;
-    if (autoImportTried.current || loading || visibleAccounts.length > 0) return;
-    autoImportTried.current = true;
-    void importLocal()
-      .then(() => void fetchAll())
-      .catch(() => {
-        /* 本机无 WorkBuddy 登录态时静默，不打扰用户 */
-      });
-  }, [variant, visibleAccounts.length, loading, importLocal, fetchAll]);
 
   async function refreshCodebuddyCliStatus() {
     try {
@@ -566,18 +546,6 @@ export default function AccountsPage() {
     if (!visibleAccounts.length) return;
     void ensureCredits(visibleAccounts.map((account) => account.id));
   }, [visibleAccounts, ensureCredits]);
-
-  async function onImport() {
-    setImporting(true);
-    try {
-      const acc = await importLocal();
-      toast.success("账号已导入", { description: acc.nickname || acc.email || acc.id });
-    } catch (e) {
-      toast.error("导入失败", { description: api.asError(e) });
-    } finally {
-      setImporting(false);
-    }
-  }
 
   /** 导出完成提示（含安全提醒）。 */
   function onExported(count: number) {
@@ -954,12 +922,6 @@ export default function AccountsPage() {
                 {variant === "ai" ? "OAuth 登录" : "OAuth 扫码添加"}
               </Button>
             </DemoAction>
-            <DemoAction>
-              <Button className="h-10 px-4" onClick={onImport} disabled={importing} variant="outline">
-                {importing ? <Loader2 className="animate-spin" /> : <Download />}
-                {variant === "ai" ? "导入本机国际版账号" : "导入本机账号"}
-              </Button>
-            </DemoAction>
           </div>
           <div className="flex items-center gap-1">
             <DemoAction>
@@ -1092,12 +1054,12 @@ export default function AccountsPage() {
               <>
                 <p>暂无国际版账号。</p>
                 <p className="mt-2 text-xs leading-5">
-                  请确认本机已安装 {appName}（客户端下载域名 {variantDownloadDomain(variant)}）并登录，
-                  再点击上方「导入本机国际版账号」；也可以直接「OAuth 登录」添加国际版账号。
+                  点击上方「OAuth 登录」添加账号；本机已登录的账号也请一并添加，以便随时切回。
+                  切换前请确认本机已安装 {appName}（客户端下载域名 {variantDownloadDomain(variant)}）。
                 </p>
               </>
             ) : (
-              "暂无账号。点击上方按钮导入本机账号或扫码登录。"
+              "暂无账号。点击上方「OAuth 扫码添加」接入账号；本机已登录的账号也请一并添加，以便随时切回。"
             )}
           </div>
         ) : (
