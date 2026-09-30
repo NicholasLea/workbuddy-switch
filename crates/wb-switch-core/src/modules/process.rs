@@ -1497,6 +1497,12 @@ D:\Users\Zhou\AppData\Local\Programs\WorkBuddy\WorkBuddy.exe
     #[cfg(target_os = "windows")]
     const TEST_APP_PATHS_ROOT: &str = r"HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths";
 
+    /// 本组用例每个都要多次启动 PowerShell/reg.exe；CI（windows-latest）上并发
+    /// 启动会互相挤占，曾出现 8s/15s 超时的假失败（同代码重跑即过）。与
+    /// cli_auth_sync_e2e 的 ENV_LOCK 同一思路：组内用例串行执行。
+    #[cfg(target_os = "windows")]
+    static REGISTRY_PROBE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// 执行 reg.exe（best-effort，清理路径用：失败不 panic）。
     #[cfg(target_os = "windows")]
     fn reg_try(args: &[&str]) {
@@ -1532,8 +1538,8 @@ D:\Users\Zhou\AppData\Local\Programs\WorkBuddy\WorkBuddy.exe
              elseif ($null -eq $p.'(default)' -or [string]$p.'(default)' -eq '') {{ 'NODEFAULT' }} \
              else {{ 'VALUE:' + [string]$p.'(default)' }}"
         );
-        let out = ps_output(&script, 15)
-            .expect("读取 App Paths 原默认值失败（powershell 未启动或超时），中止以避免误删现有键");
+        let out = ps_output(&script, 60)
+            .expect("读取 App Paths 原默认值失败（powershell 60s 未返回），中止以避免误删现有键");
         let value = out.trim();
         if value == "MISSING" || value == "NODEFAULT" {
             return None;
@@ -1546,6 +1552,18 @@ D:\Users\Zhou\AppData\Local\Programs\WorkBuddy\WorkBuddy.exe
         } else {
             Some(raw.to_string())
         }
+    }
+
+    /// 测试专用注册表探测：与生产同链路，但超时放宽到 60s 并在超时时显式失败。
+    ///
+    /// 生产侧 8s 是给真实用户的等待兜底，不因 CI 放宽；测试侧把「超时」与
+    /// 「探测为空」区分开，避免把环境抖动误报成功能回归（曾出现候选=[] 的假失败）。
+    #[cfg(target_os = "windows")]
+    fn probe_candidates_for_test(variant: WbVariant) -> Vec<PathBuf> {
+        let Some(stdout) = ps_output(&windows_registry_probe_script(variant), 60) else {
+            panic!("注册表探测 PowerShell 60s 未返回，无法判定功能是否正常");
+        };
+        parse_windows_registry_path_lines(&stdout, variant)
     }
 
     /// 合成注册表项 + 临时目录的 RAII 夹具：Drop 时无条件清理。
@@ -1669,7 +1687,7 @@ D:\Users\Zhou\AppData\Local\Programs\WorkBuddy\WorkBuddy.exe
         fn cleanup_and_verify(&mut self, variants: &[WbVariant]) {
             self.cleanup();
             for variant in variants {
-                let after = windows_registry_exe_candidates(*variant);
+                let after = probe_candidates_for_test(*variant);
                 assert!(
                     !after.iter().any(|p| p.starts_with(&self.dir)),
                     "清理后仍能探测到合成路径（{variant:?}）: {after:?}"
@@ -1690,6 +1708,9 @@ D:\Users\Zhou\AppData\Local\Programs\WorkBuddy\WorkBuddy.exe
     #[cfg(target_os = "windows")]
     #[test]
     fn windows_registry_probe_resolves_custom_dir_uninstall_entry() {
+        let _guard = REGISTRY_PROBE_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let mut fx = RegistryProbeFixture::new("uninstall");
         let exe = fx.stub_exe(&fx.dir, "WorkBuddy.exe");
         let key = format!(
@@ -1698,7 +1719,7 @@ D:\Users\Zhou\AppData\Local\Programs\WorkBuddy\WorkBuddy.exe
         );
         fx.write_uninstall(&key, "WorkBuddy", &format!("\"{}\",0", exe.display()));
 
-        let cands = windows_registry_exe_candidates(WbVariant::Cn);
+        let cands = probe_candidates_for_test(WbVariant::Cn);
         assert!(
             cands.iter().any(|p| p == &exe),
             "Uninstall DisplayIcon 未解析出自定义目录 exe（期望 {}）: 候选={cands:?}",
@@ -1712,11 +1733,14 @@ D:\Users\Zhou\AppData\Local\Programs\WorkBuddy\WorkBuddy.exe
     #[cfg(target_os = "windows")]
     #[test]
     fn windows_registry_probe_resolves_custom_dir_app_paths_entry() {
+        let _guard = REGISTRY_PROBE_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let mut fx = RegistryProbeFixture::new("app-paths");
         let exe = fx.stub_exe(&fx.dir, "WorkBuddy.exe");
         fx.write_app_paths("WorkBuddy.exe", &exe.to_string_lossy());
 
-        let cands = windows_registry_exe_candidates(WbVariant::Cn);
+        let cands = probe_candidates_for_test(WbVariant::Cn);
         assert!(
             cands.iter().any(|p| p == &exe),
             "App Paths 默认值未解析出自定义目录 exe（期望 {}）: 候选={cands:?}",
@@ -1730,6 +1754,9 @@ D:\Users\Zhou\AppData\Local\Programs\WorkBuddy\WorkBuddy.exe
     #[cfg(target_os = "windows")]
     #[test]
     fn windows_registry_probe_isolates_variants() {
+        let _guard = REGISTRY_PROBE_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let mut fx = RegistryProbeFixture::new("variants");
         let cn_dir = fx.subdir("cn");
         let ai_dir = fx.subdir("ai");
@@ -1749,7 +1776,7 @@ D:\Users\Zhou\AppData\Local\Programs\WorkBuddy\WorkBuddy.exe
         );
         fx.write_app_paths("WorkBuddyAI.exe", &ai_exe.to_string_lossy());
 
-        let cn = windows_registry_exe_candidates(WbVariant::Cn);
+        let cn = probe_candidates_for_test(WbVariant::Cn);
         assert!(
             cn.iter().any(|p| p == &cn_exe),
             "CN 未解析出自定义目录 exe: 候选={cn:?}"
@@ -1759,7 +1786,7 @@ D:\Users\Zhou\AppData\Local\Programs\WorkBuddy\WorkBuddy.exe
             "CN 档位串到国际版合成目录: 候选={cn:?}"
         );
 
-        let ai = windows_registry_exe_candidates(WbVariant::Ai);
+        let ai = probe_candidates_for_test(WbVariant::Ai);
         assert!(
             ai.iter().any(|p| p == &ai_exe),
             "AI 未解析出自定义目录 exe: 候选={ai:?}"
@@ -1776,6 +1803,9 @@ D:\Users\Zhou\AppData\Local\Programs\WorkBuddy\WorkBuddy.exe
     #[cfg(target_os = "windows")]
     #[test]
     fn windows_registry_probe_excludes_self_entries() {
+        let _guard = REGISTRY_PROBE_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let mut fx = RegistryProbeFixture::new("self");
         let self_exe = fx.stub_exe(&fx.dir, "workbuddy-switch.exe");
         let real_exe = fx.stub_exe(&fx.dir, "WorkBuddy.exe");
@@ -1793,7 +1823,7 @@ D:\Users\Zhou\AppData\Local\Programs\WorkBuddy\WorkBuddy.exe
             &real_exe.to_string_lossy(),
         );
 
-        let cn = windows_registry_exe_candidates(WbVariant::Cn);
+        let cn = probe_candidates_for_test(WbVariant::Cn);
         assert!(
             cn.iter().any(|p| p == &real_exe),
             "对照组条目未被命中，无法证明探测链路工作: 候选={cn:?}"
