@@ -16,25 +16,11 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/comp
 import { CodeBuddyCnIdeMark, CodeBuddyMark, JetbrainsMark, VscodeExtMark, WorkBuddyMark } from "@/components/product-marks";
 import type { ToolId } from "@/lib/supported-tools";
 import { cn } from "@/lib/utils";
-import { displayName } from "@/lib/account-display";
+import { accountIdentity, displayName } from "@/lib/account-display";
+import { avatarTone } from "@/lib/avatar-tone";
 import { creditResourceName } from "@/lib/credit-package-names";
 import { demoModeEnabled } from "@/lib/demo-mode";
 import type { AccountMeta, CreditExpiry, CreditResource, RateLimitEntry, TravelStatus } from "@/lib/types";
-
-const AVATAR_TONES = [
-  "bg-emerald-100 text-emerald-800",
-  "bg-violet-100 text-violet-800",
-  "bg-sky-100 text-sky-800",
-  "bg-amber-100 text-amber-800",
-  "bg-rose-100 text-rose-800",
-  "bg-teal-100 text-teal-800",
-] as const;
-
-function avatarTone(name: string) {
-  let hash = 0;
-  for (let i = 0; i < name.length; i += 1) hash = (hash * 31 + name.charCodeAt(i)) >>> 0;
-  return AVATAR_TONES[hash % AVATAR_TONES.length];
-}
 
 function formatCredits(value: number): string {
   if (!Number.isFinite(value)) return "—";
@@ -87,15 +73,6 @@ function creditResources(credit?: CreditExpiry): CreditResource[] {
       return leftExpiry === rightExpiry ? left.index - right.index : leftExpiry - rightExpiry;
     })
     .map(({ resource }) => resource);
-}
-
-function accountIdentity(account: AccountMeta): string {
-  if (account.email) {
-    const [local, domain] = account.email.split("@");
-    if (!domain) return account.email;
-    return `${local.slice(0, 1)}${"*".repeat(Math.max(3, local.length - 1))}@${domain}`;
-  }
-  return account.uid ? `UID · ${account.uid}` : `ID · ${account.id}`;
 }
 
 const chipClass = "rounded-md px-1.5 py-0 text-[11px] font-medium";

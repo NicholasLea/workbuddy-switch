@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
-import { Loader2 } from "lucide-react";
+import { Check, Copy, Loader2 } from "lucide-react";
 import { toast } from "sonner";
 
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -15,6 +16,9 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import * as api from "@/lib/api";
+import { accountIdentity } from "@/lib/account-display";
+import { avatarTone } from "@/lib/avatar-tone";
+import { cn } from "@/lib/utils";
 import { accountVariant, variantLabel } from "@/lib/variant";
 import type { AccountMeta, DisplayField } from "@/lib/types";
 
@@ -44,6 +48,7 @@ export function AccountInfoDialog({ open, onOpenChange, account, onSaved }: Prop
   const [note, setNote] = useState("");
   const [field, setField] = useState<DisplayField>("nickname");
   const [busy, setBusy] = useState(false);
+  const [uidCopied, setUidCopied] = useState(false);
   // 关闭时父组件会清空 account：保留最后一次的账号继续渲染，让退出动画播完再卸载。
   const [snapshot, setSnapshot] = useState<AccountMeta | null>(null);
 
@@ -53,6 +58,7 @@ export function AccountInfoDialog({ open, onOpenChange, account, onSaved }: Prop
       setNote(account.note ?? "");
       setField(account.displayField ?? "nickname");
       setBusy(false);
+      setUidCopied(false);
     }
   }, [open, account]);
 
@@ -69,13 +75,27 @@ export function AccountInfoDialog({ open, onOpenChange, account, onSaved }: Prop
   // 手机号不可用时回退账号名（含用户此前选择 phone 的存量数据）。
   const effectiveField: DisplayField = field === "phone" && !hasPhone ? "nickname" : field;
 
-  const infoRows: Array<[string, string | null]> = [
-    ["账号名", current.nickname],
-    ["手机号", current.phoneNumber ?? null],
-    ["企业名", current.enterpriseName],
-    ["UID", current.uid],
-    ["档位", variantLabel(accountVariant(current))],
-  ];
+  // 头部身份区展示官方字段（昵称 / 手机号 / 邮箱），不随本地显示偏好变化。
+  const name = current.nickname ?? current.uid ?? current.id ?? "未命名账号";
+  const subtitle = current.phoneNumber ?? accountIdentity(current);
+  const uid = current.uid;
+
+  /** 「卡片显示」每格的实时预览值：备注格跟随输入框草稿，改完即可见。 */
+  function previewValue(value: DisplayField): string {
+    if (value === "nickname") return current?.nickname ?? "—";
+    if (value === "phone") return current?.phoneNumber ?? "无手机号";
+    return note.trim() || "未填写备注";
+  }
+
+  async function copyUid(value: string) {
+    try {
+      await navigator.clipboard.writeText(value);
+      setUidCopied(true);
+      window.setTimeout(() => setUidCopied(false), 1500);
+    } catch (e) {
+      toast.error("复制失败", { description: api.asError(e) });
+    }
+  }
 
   async function save() {
     setBusy(true);
@@ -99,63 +119,119 @@ export function AccountInfoDialog({ open, onOpenChange, account, onSaved }: Prop
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
           <DialogTitle>账号信息</DialogTitle>
-          <DialogDescription>查看账号信息；备注与显示字段仅保存在本机。</DialogDescription>
+          <DialogDescription>备注与显示字段仅保存在本机。</DialogDescription>
         </DialogHeader>
 
-        <div className="space-y-5">
-          <dl className="space-y-2 rounded-lg border bg-muted/30 p-3 text-xs">
-            {infoRows.map(([label, value]) => (
-              <div key={label} className="flex items-start gap-3">
-                <dt className="w-14 shrink-0 text-muted-foreground">{label}</dt>
-                <dd className="min-w-0 flex-1 truncate font-medium" title={value ?? ""}>
-                  {value || "—"}
-                </dd>
-              </div>
-            ))}
-          </dl>
-
-          <div className="space-y-2">
-            <Label htmlFor="account-note">备注</Label>
-            <Input
-              id="account-note"
-              value={note}
-              maxLength={NOTE_MAX_LENGTH}
-              placeholder={`最多 ${NOTE_MAX_LENGTH} 个字符`}
-              onChange={(e) => setNote(e.target.value)}
-            />
-          </div>
-
-          <div className="space-y-2">
-            <Label>卡片显示</Label>
-            <RadioGroup
-              value={effectiveField}
-              onValueChange={(value) => setField(value as DisplayField)}
-              className="gap-2.5"
-            >
-              {FIELD_OPTIONS.map((opt) => {
-                const id = `display-field-${opt.value}`;
-                return (
-                  <div key={opt.value} className="flex items-center gap-2">
-                    <RadioGroupItem
-                      value={opt.value}
-                      id={id}
-                      disabled={opt.value === "phone" && !hasPhone}
-                      className="peer"
-                    />
-                    <Label htmlFor={id} className="cursor-pointer font-normal">
-                      {opt.label}
-                    </Label>
-                  </div>
-                );
-              })}
-            </RadioGroup>
-            {!hasPhone && (
-              <p className="text-xs text-muted-foreground">该账号没有手机号，无法按手机号显示。</p>
+        {/* 身份区：与账号卡片同一视觉语言（色调头像 + 名称 + 档位徽标）。 */}
+        <div className="flex items-center gap-3">
+          <div
+            className={cn(
+              "flex size-11 shrink-0 items-center justify-center rounded-full text-base font-semibold",
+              avatarTone(name),
             )}
+            aria-hidden="true"
+          >
+            {name.charAt(0).toUpperCase()}
+          </div>
+          <div className="min-w-0 flex-1">
+            <div className="flex min-w-0 items-center gap-2">
+              <span className="truncate text-sm font-semibold" title={name}>
+                {name}
+              </span>
+              <Badge variant="secondary" className="shrink-0 px-1.5 py-0 text-[10px] font-medium">
+                {variantLabel(accountVariant(current))}
+              </Badge>
+            </div>
+            <p className="mt-0.5 truncate text-xs text-muted-foreground" title={subtitle}>
+              {subtitle}
+            </p>
           </div>
         </div>
 
-        <DialogFooter className="mt-3">
+        {/* 次级字段：企业名与 UID（等宽 + 一键复制）。 */}
+        <dl className="divide-y divide-border/70 rounded-lg border text-xs">
+          <div className="flex items-center gap-3 px-3 py-2.5">
+            <dt className="w-12 shrink-0 text-muted-foreground">企业名</dt>
+            <dd className="min-w-0 flex-1 truncate font-medium" title={current.enterpriseName ?? ""}>
+              {current.enterpriseName || "—"}
+            </dd>
+          </div>
+          <div className="flex items-center gap-3 px-3 py-2.5">
+            <dt className="w-12 shrink-0 text-muted-foreground">UID</dt>
+            <dd
+              className="min-w-0 flex-1 truncate font-mono text-[11px] text-muted-foreground"
+              title={uid ?? ""}
+            >
+              {uid ?? "—"}
+            </dd>
+            {uid && (
+              <button
+                type="button"
+                className="shrink-0 cursor-pointer rounded-md p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                onClick={() => void copyUid(uid)}
+                aria-label="复制 UID"
+                title="复制 UID"
+              >
+                {uidCopied ? <Check className="size-3.5 text-primary" /> : <Copy className="size-3.5" />}
+              </button>
+            )}
+          </div>
+        </dl>
+
+        <div className="space-y-1.5">
+          <div className="flex items-baseline justify-between">
+            <Label htmlFor="account-note" className="text-xs font-medium text-muted-foreground">
+              备注
+            </Label>
+            <span className="text-[11px] tabular-nums text-muted-foreground">
+              {note.length}/{NOTE_MAX_LENGTH}
+            </span>
+          </div>
+          <Input
+            id="account-note"
+            value={note}
+            maxLength={NOTE_MAX_LENGTH}
+            placeholder={`最多 ${NOTE_MAX_LENGTH} 个字符`}
+            onChange={(e) => setNote(e.target.value)}
+          />
+        </div>
+
+        <div className="space-y-1.5">
+          <Label className="text-xs font-medium text-muted-foreground">卡片显示</Label>
+          <RadioGroup
+            value={effectiveField}
+            onValueChange={(value) => setField(value as DisplayField)}
+            className="grid grid-cols-3 gap-2"
+          >
+            {FIELD_OPTIONS.map((opt) => {
+              const id = `display-field-${opt.value}`;
+              const disabled = opt.value === "phone" && !hasPhone;
+              const selected = effectiveField === opt.value;
+              return (
+                <Label
+                  key={opt.value}
+                  htmlFor={id}
+                  className={cn(
+                    "flex cursor-pointer flex-col gap-1 rounded-lg border px-2.5 py-2 transition-colors",
+                    selected ? "border-primary/60 bg-primary/5" : "border-border hover:bg-muted/40",
+                    disabled && "cursor-not-allowed opacity-50 hover:bg-transparent",
+                  )}
+                >
+                  <span className="flex items-center justify-between gap-1">
+                    <span className="text-xs font-medium">{opt.label}</span>
+                    <RadioGroupItem value={opt.value} id={id} disabled={disabled} className="size-3.5 shrink-0" />
+                  </span>
+                  <span className="truncate text-[11px] text-muted-foreground">{previewValue(opt.value)}</span>
+                </Label>
+              );
+            })}
+          </RadioGroup>
+          {!hasPhone && (
+            <p className="text-[11px] text-muted-foreground">该账号没有手机号，无法按手机号显示。</p>
+          )}
+        </div>
+
+        <DialogFooter>
           <Button variant="outline" disabled={busy} onClick={() => onOpenChange(false)}>
             取消
           </Button>

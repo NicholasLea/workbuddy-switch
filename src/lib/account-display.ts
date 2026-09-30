@@ -8,6 +8,7 @@ export interface DisplayableAccount {
   nickname?: string | null;
   uid?: string | null;
   id?: string | null;
+  email?: string | null;
   /** 官方手机号（仅国内版账号可能有）。 */
   phoneNumber?: string | null;
   /** 本地备注。 */
@@ -30,4 +31,14 @@ export function displayName(account: DisplayableAccount): string {
         ? account.note
         : account.nickname;
   return byField || account.nickname || account.uid || account.id || "未命名账号";
+}
+
+/** 账号身份行：邮箱脱敏展示（本地段只留首字符），无邮箱时回退 UID / ID。 */
+export function accountIdentity(account: DisplayableAccount): string {
+  if (account.email) {
+    const [local, domain] = account.email.split("@");
+    if (!domain) return account.email;
+    return `${local.slice(0, 1)}${"*".repeat(Math.max(3, local.length - 1))}@${domain}`;
+  }
+  return account.uid ? `UID · ${account.uid}` : `ID · ${account.id}`;
 }
