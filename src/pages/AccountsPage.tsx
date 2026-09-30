@@ -59,7 +59,7 @@ import {
   variantUsesIntlCodebuddyIde,
 } from "@/lib/variant";
 import { useSupportedTools } from "@/lib/supported-tools";
-import type { AccountMeta, AppStatus, CheckinConfig, CodeBuddyCliStatus, CodeBuddyCnIdeStatus, CreditExpiry, JetbrainsStatus, RateLimitEntry, TravelConfig, TravelStatus, VscodeExtStatus } from "@/lib/types";
+import type { AccountMeta, AppStatus, CheckinConfig, CreditExpiry, RateLimitEntry, TravelConfig, TravelStatus } from "@/lib/types";
 import { displayName } from "@/lib/account-display";
 import { cn } from "@/lib/utils";
 import { useAccountsStore } from "@/stores/accounts";
@@ -179,6 +179,8 @@ export default function AccountsPage() {
     refreshingCredits,
     ensureCredits,
     refreshCredits,
+    clientStatus,
+    setClientStatus,
   } = useAccountsStore();
   const [oauthOpen, setOauthOpen] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
@@ -209,15 +211,17 @@ export default function AccountsPage() {
    * `null` = 配置尚未读到，不得按默认 true 先扫一轮（关闭开关后进账号页会闪 chip / 误请求）。
    */
   const [rateLimitEnabled, setRateLimitEnabled] = useState<boolean | null>(null);
-  const [codebuddyCli, setCodebuddyCli] = useState<CodeBuddyCliStatus | null>(null);
+  /**
+   * 各客户端状态（CLI / CodeBuddy IDE / VS Code / JetBrains）放在 store 里：
+   * 账号页每次进入都会重挂载，局部 state 会被重置为 `null`，界面先按「未接入」
+   * 渲染、等状态探测回来才改口（issue #84）。store 里则先按上次结果渲染。
+   */
+  const { codebuddyCli, codebuddyCnIde, vscodeExt, jetbrains } = clientStatus;
   const [codebuddyCliSwitchingId, setCodebuddyCliSwitchingId] = useState<string | null>(null);
-  const [codebuddyCnIde, setCodebuddyCnIde] = useState<CodeBuddyCnIdeStatus | null>(null);
   /** CodeBuddy IDE 切换弹窗目标（null=关闭）；切换与可选会话复制/同步在弹窗内完成（国内版 / 国际版共用）。 */
   const [codebuddyIdeSwitchAccount, setCodebuddyIdeSwitchAccount] = useState<AccountMeta | null>(null);
-  const [vscodeExt, setVscodeExt] = useState<VscodeExtStatus | null>(null);
   /** VS Code 扩展切换弹窗目标（null=关闭）；切换与可选会话复制在弹窗内完成。 */
   const [vscodeSwitchAccount, setVscodeSwitchAccount] = useState<AccountMeta | null>(null);
-  const [jetbrains, setJetbrains] = useState<JetbrainsStatus | null>(null);
   /** JetBrains 切换弹窗目标（null=关闭）；切换与目标 IDE 选择在弹窗内完成。 */
   const [jetbrainsSwitchTarget, setJetbrainsSwitchTarget] = useState<AccountMeta | null>(null);
   const [installingCodebuddyCli, setInstallingCodebuddyCli] = useState(false);
@@ -305,37 +309,37 @@ export default function AccountsPage() {
 
   async function refreshCodebuddyCliStatus() {
     try {
-      setCodebuddyCli(await api.getCodebuddyCliStatus());
+      setClientStatus({ codebuddyCli: await api.getCodebuddyCliStatus() });
     } catch {
-      setCodebuddyCli(null);
+      setClientStatus({ codebuddyCli: null });
     }
   }
 
   async function refreshCodebuddyCnIdeStatus() {
     try {
-      setCodebuddyCnIde(
-        variantUsesIntlCodebuddyIde(variant)
+      setClientStatus({
+        codebuddyCnIde: variantUsesIntlCodebuddyIde(variant)
           ? await api.getCodebuddyIdeStatus()
           : await api.getCodebuddyCnIdeStatus(),
-      );
+      });
     } catch {
-      setCodebuddyCnIde(null);
+      setClientStatus({ codebuddyCnIde: null });
     }
   }
 
   async function refreshVscodeExtStatus() {
     try {
-      setVscodeExt(await api.getVscodeExtStatus());
+      setClientStatus({ vscodeExt: await api.getVscodeExtStatus() });
     } catch {
-      setVscodeExt(null);
+      setClientStatus({ vscodeExt: null });
     }
   }
 
   async function refreshJetbrainsStatus() {
     try {
-      setJetbrains(await api.getJetbrainsStatus());
+      setClientStatus({ jetbrains: await api.getJetbrainsStatus() });
     } catch {
-      setJetbrains(null);
+      setClientStatus({ jetbrains: null });
     }
   }
 
@@ -343,7 +347,25 @@ export default function AccountsPage() {
     let cancelled = false;
     // 支持工具关闭的端：既不探测也不轮询（与入口隐藏保持一致，省掉无谓请求）。
     if (enabledTools.codebuddyCli) void refreshCodebuddyCliStatus();
+
+    /**
+     * 读各端状态（安装 / 运行 / 当前账号）：只读本地状态文件与进程，不碰钥匙串，
+     * 因此不必等下面的本机登录探测。
+     */
+    async function refreshClientStatuses() {
+      if (cancelled) return;
+      if (enabledTools.codebuddyIde) await refreshCodebuddyCnIdeStatus();
+      if (cancelled) return;
+      if (enabledTools.vscodeExt) await refreshVscodeExtStatus();
+      if (cancelled) return;
+      if (enabledTools.jetbrains) await refreshJetbrainsStatus();
+    }
+
     void (async () => {
+      // 状态刷新与登录探测并行起跑：探测要读钥匙串 / Safe Storage / 注册表 / 进程
+      // （macOS 可能等待系统授权、Windows 走 PowerShell，耗时可达数秒），排在状态
+      // 前面会让「已接入」迟迟不显示（issue #84）。
+      const statuses = refreshClientStatuses();
       if (!api.isDemoMode()) {
         if (enabledTools.codebuddyIde) {
           try {
@@ -372,11 +394,9 @@ export default function AccountsPage() {
           }
         }
       }
-      if (!cancelled) {
-        if (enabledTools.codebuddyIde) await refreshCodebuddyCnIdeStatus();
-        if (enabledTools.vscodeExt) await refreshVscodeExtStatus();
-        if (enabledTools.jetbrains) await refreshJetbrainsStatus();
-      }
+      await statuses;
+      // 探测命中账号时后端会把「当前账号」写回本地状态，再读一次让高亮跟上。
+      if (!cancelled) await refreshClientStatuses();
     })();
     return () => {
       cancelled = true;
