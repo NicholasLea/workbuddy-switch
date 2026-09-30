@@ -1,6 +1,7 @@
 import type {
   AccountMeta, AppStatus, AutoRotateConfig, CheckinConfig, CheckinLog,
   CodeBuddyCliStatus, CodeBuddyCliSwitchResult, CodeBuddyCnIdeStatus, CreditExpiry, CreditOfficialUsageModel, CreditStatistics,
+  DisplayField,
   GithubConfig, RateLimitHookStatus, RateLimitsPayload, RotateLog, RotateStatus, TokenStatistics, TokenStatsGroup, TokenStatsRequestRow, TokenStatsSource, TokenStatsTotals,
   Session, SessionLinkPreviewGroup, SessionLinksPreview, SessionSyncVerdict, SessionGroupClient, SessionGroupSummary, SessionGroupDetail, SessionGroupList, SessionGroupPairPreview, SessionMemberVersionStatus, TravelConfig, TravelStatus, VscodeExtStatus, VscodeSessionList,
 } from "./types";
@@ -29,8 +30,8 @@ const intlAccountA: AccountMeta = { id: "demo-account-ai-a", uid: "demo-intl-001
 const intlAccountB: AccountMeta = { id: "demo-account-ai-b", uid: "demo-intl-002", email: "intl-b@example.com", nickname: "国际版 B", enterpriseName: "Demo Workspace", expiresAt: 0, refreshExpiresAt: 0, refreshedAt: 0, createdAt: 0, needsRelogin: false, needsReloginReason: null, variant: "ai" };
 
 const accounts: AccountMeta[] = [
-  { id: "demo-account-a", uid: "demo-user-001", email: "test-a@example.com", nickname: "测试 A", enterpriseName: "Demo Workspace", expiresAt: 0, refreshExpiresAt: 0, refreshedAt: 0, createdAt: 0, needsRelogin: false, needsReloginReason: null, variant: "cn" },
-  { id: "demo-account-b", uid: "demo-user-002", email: "test-b@example.com", nickname: "测试 B", enterpriseName: "Demo Workspace", expiresAt: 0, refreshExpiresAt: 0, refreshedAt: 0, createdAt: 0, needsRelogin: false, needsReloginReason: null, variant: "cn" },
+  { id: "demo-account-a", uid: "demo-user-001", email: "test-a@example.com", nickname: "测试 A", phoneNumber: "138 0013 8001", note: "主力账号", enterpriseName: "Demo Workspace", expiresAt: 0, refreshExpiresAt: 0, refreshedAt: 0, createdAt: 0, needsRelogin: false, needsReloginReason: null, variant: "cn" },
+  { id: "demo-account-b", uid: "demo-user-002", email: "test-b@example.com", nickname: "测试 B", phoneNumber: "138 0013 8002", note: "备用号", displayField: "note", enterpriseName: "Demo Workspace", expiresAt: 0, refreshExpiresAt: 0, refreshedAt: 0, createdAt: 0, needsRelogin: false, needsReloginReason: null, variant: "cn" },
   { id: "demo-account-c", uid: "demo-user-003", email: "test-c@example.com", nickname: "测试 C", enterpriseName: "Demo Workspace", expiresAt: 0, refreshExpiresAt: 0, refreshedAt: 0, createdAt: 0, needsRelogin: false, needsReloginReason: null, variant: "cn" },
   intlAccountA,
   intlAccountB,
@@ -904,6 +905,18 @@ export function screenshotDemoResponse(command: string, args?: Record<string, un
       if (!target) throw new Error("账号不存在");
       demoActiveCliAccountId = target.id;
       return { ok: true, configured: true, synced: true, verified: true, activeIndex: demoAccounts.indexOf(target), activeAccountId: target.id, regionChanged: false, cliClosed: false, closedProcessCount: 0, message: "演示切换已完成" } satisfies CodeBuddyCliSwitchResult;
+    }
+    // 写操作：演示模式下直接改内存里的演示账号，保存后卡片/弹框立即可见。
+    case "update_account_display": {
+      const target = accounts.find((account) => account.id === args?.accountId);
+      if (!target) throw new Error("账号不存在");
+      const patch = (args?.patch ?? {}) as { note?: string | null; displayField?: DisplayField };
+      if ("note" in patch) {
+        const trimmed = typeof patch.note === "string" ? patch.note.trim() : "";
+        target.note = trimmed || null;
+      }
+      if (patch.displayField) target.displayField = patch.displayField;
+      return { ok: true, account: { ...target } };
     }
     case "get_checkin_status": return { ok: true, todayCheckedIn: true };
     case "get_credit_expiry": return creditExpiry(String(args?.accountId ?? ""));

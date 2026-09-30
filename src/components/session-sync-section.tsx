@@ -14,6 +14,7 @@ import {
   type SessionLinksMeta,
 } from "@/components/session-link-shared";
 import * as api from "@/lib/api";
+import { displayName } from "@/lib/account-display";
 import { cn } from "@/lib/utils";
 import { accountVariant } from "@/lib/variant";
 import type {
@@ -99,7 +100,7 @@ export function SessionSyncSection({ account, open, disabled, onChange, onMetaCh
   const groups = preview?.groups ?? [];
   // 国际版能力判定不通过：整块不可用（后端执行时仍会强制检查能力）。
   const unsupported = Boolean(preview && (!preview.supported || preview.storeStatus === "unsupported"));
-  const targetLabel = account?.nickname || account?.email || account?.uid || "目标账号";
+  const targetLabel = account ? displayName(account) : "目标账号";
 
   // 状态上报：父组件据此渲染 tab 徽标与常驻提示。
   useEffect(() => {

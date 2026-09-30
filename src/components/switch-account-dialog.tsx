@@ -19,6 +19,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { SessionSyncSection, type SessionLinksMeta } from "@/components/session-sync-section";
 import { SessionTreeList } from "@/components/session-tree";
 import * as api from "@/lib/api";
+import { displayName } from "@/lib/account-display";
 import { accountVariant, variantAppName } from "@/lib/variant";
 import type {
   AccountMeta,
@@ -192,7 +193,7 @@ export function SwitchAccountDialog({ open, onOpenChange, account, onDone }: Pro
         // 勾选绑定预览凭据；执行前后端会重新校验，版本变化则跳过该项。
         syncSelections: requestedSync ? syncSelections : undefined,
       });
-      const nickname = account.nickname || account.email || account.uid || "该账号";
+      const nickname = displayName(account);
       const parts: string[] = [];
       const copyReport = res.sessionCopy;
       const copiedCount = copyReport?.copied?.length ?? 0;
@@ -451,7 +452,7 @@ export function SwitchAccountDialog({ open, onOpenChange, account, onDone }: Pro
         <DialogAutoHeight>
         <div className="flex max-h-[calc(min(90vh,100vh-2rem)-2px)] min-w-0 flex-col gap-4 p-6">
         <DialogHeader className="shrink-0">
-          <DialogTitle>切换到「{account?.nickname || account?.email || account?.uid || "该账号"}」</DialogTitle>
+          <DialogTitle>切换到「{account ? displayName(account) : "该账号"}」</DialogTitle>
           <DialogDescription>切换时将重启 {variantAppName(accountVariant(account))}。</DialogDescription>
         </DialogHeader>
 

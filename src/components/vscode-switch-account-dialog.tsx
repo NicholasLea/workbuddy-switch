@@ -19,6 +19,7 @@ import { buildGroups, SessionCopyTab } from "@/components/session-copy-tab";
 import type { SessionLinksMeta } from "@/components/session-link-shared";
 import { VscodeSessionSyncSection } from "@/components/vscode-session-sync-section";
 import * as api from "@/lib/api";
+import { displayName } from "@/lib/account-display";
 import type {
   AccountMeta,
   SessionLinkPreviewGroup,
@@ -175,7 +176,7 @@ export function VscodeSwitchAccountDialog({ open, onOpenChange, account, vscodeE
         refs,
         syncSelections.length > 0 ? syncSelections : undefined,
       );
-      const nickname = account.nickname || account.email || account.uid || "该账号";
+      const nickname = displayName(account);
       const copied = res.sessionCopy?.copied.length ?? 0;
       const errors = res.sessionCopy?.errors ?? [];
       const linkErrors = res.sessionCopy?.linkErrors ?? [];
@@ -344,7 +345,7 @@ export function VscodeSwitchAccountDialog({ open, onOpenChange, account, vscodeE
         <DialogHeader className="shrink-0">
           <div className="flex items-center gap-3">
             <DialogTitle className="min-w-0 flex-1">
-              切换到「{account?.nickname || account?.email || account?.uid || "该账号"}」
+              切换到「{account ? displayName(account) : "该账号"}」
             </DialogTitle>
             {/* 提示收进图标 tooltip、开关与标题同行；mr-6 为右上角关闭按钮留空位。 */}
             <div className="mr-6 flex shrink-0 items-center gap-2">

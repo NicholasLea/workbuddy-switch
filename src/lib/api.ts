@@ -480,6 +480,14 @@ export function updateAccountDisplay(
   accountId: string,
   patch: { note?: string | null; displayField?: DisplayField },
 ): Promise<{ ok: boolean; account: AccountMeta }> {
+  if (demoModeEnabled) {
+    return Promise.resolve(
+      screenshotDemoResponse("update_account_display", { accountId, patch }) as {
+        ok: boolean;
+        account: AccountMeta;
+      },
+    );
+  }
   return call("update_account_display", { accountId, patch });
 }
 
