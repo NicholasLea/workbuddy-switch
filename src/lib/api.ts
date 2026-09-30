@@ -15,6 +15,7 @@ import type {
   CheckinResult,
   CreditExpiry,
   CreditStatistics,
+  DisplayField,
   TokenStatistics,
   ErrorLogKind,
   GithubConfig,
@@ -134,6 +135,7 @@ const ROUTES: Record<string, Route> = {
     path: "/api/codebuddy-ide/session-links",
   },
   delete_account: { method: "POST", path: "/api/delete" },
+  update_account_display: { method: "POST", path: "/api/update-account-display" },
   oauth_start: { method: "POST", path: "/api/oauth/start" },
   oauth_status: { method: "POST", path: "/api/oauth/status" },
   import_local: { method: "POST", path: "/api/import-local" },
@@ -468,6 +470,17 @@ export function detectCodebuddyIdeAccount(): Promise<{
 
 export function deleteAccount(accountId: string): Promise<{ ok: boolean }> {
   return call("delete_account", { accountId });
+}
+
+/**
+ * 更新账号本地展示字段（备注 / 显示选择）。
+ * patch 只传需要改的项：`note`（字符串或 null 清空）、`displayField`。
+ */
+export function updateAccountDisplay(
+  accountId: string,
+  patch: { note?: string | null; displayField?: DisplayField },
+): Promise<{ ok: boolean; account: AccountMeta }> {
+  return call("update_account_display", { accountId, patch });
 }
 
 /** 发起登录：国内版为扫码授权，国际版为浏览器 Web 登录授权；`variant` 缺省为国内版（档位由后端记忆，轮询无需再传）。 */

@@ -440,6 +440,12 @@ pub fn delete_account(account_id: String) -> Result<Value, String> {
     Ok(json!({ "ok": true }))
 }
 
+/// POST /api/update-account-display —— 更新账号本地展示字段（备注 / 显示选择）。
+#[tauri::command]
+pub fn update_account_display(account_id: String, patch: Value) -> Result<Value, String> {
+    account::update_account_display(&account_id, &patch)
+}
+
 /// POST /api/oauth/start —— 发起 OAuth 扫码登录（`variant` 缺省国内版）。
 #[tauri::command]
 pub async fn oauth_start(variant: Option<String>) -> Result<Value, String> {
