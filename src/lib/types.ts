@@ -6,11 +6,23 @@
  */
 export type WbVariant = "cn" | "ai";
 
+/**
+ * 账号卡片显示名取哪个字段（每账号独立的本地偏好）。
+ * 缺省/异常按 `nickname` 处理；选定字段为空时回退 `nickname → uid`。
+ */
+export type DisplayField = "nickname" | "phone" | "note";
+
 export interface AccountMeta {
   id: string;
   uid: string | null;
   email: string | null;
   nickname: string | null;
+  /** 官方手机号（实时读 profile_raw，仅国内版账号可能有）。 */
+  phoneNumber?: string | null;
+  /** 本地备注（用户自填，不来自官方数据）。 */
+  note?: string | null;
+  /** 本地显示字段偏好。 */
+  displayField?: DisplayField | null;
   enterpriseName: string | null;
   expiresAt: number | null;
   refreshExpiresAt: number | null;
@@ -730,7 +742,18 @@ export interface CodeBuddyCliStatus {
   helperSupportsAccountIds: boolean;
   helperCurrent?: boolean;
   migrationRequired?: boolean;
+  /**
+   * 需要用户介入的脱节：settings.json 里的 Token 已长期匹配不上账号库。
+   *
+   * 与 `syncInProgress` 互斥。保活刷新造成的短暂不一致不算脱节。
+   */
   syncPending?: boolean;
+  /**
+   * 保活刷新刚换完账号库的 Token、settings.json 尚未同步的正常中间态。
+   *
+   * 仅在账号库 mtime 落在同步宽限窗口内时为真；此时不该提示用户点「更新认证」。
+   */
+  syncInProgress?: boolean;
   activeIndex: number | null;
   activeAccountId: string | null;
   activeAccountName: string | null;

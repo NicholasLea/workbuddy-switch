@@ -11,6 +11,7 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigge
 import { Popover, PopoverArrow, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
+import { displayName } from "@/lib/account-display";
 import { accountVariant, variantIsIntl, variantLabel } from "@/lib/variant";
 import type { SessionGroupClient, SessionGroupCurrentAccount, SessionGroupDetail, SessionGroupMemberDetail, SessionGroupUnifyPlan } from "@/lib/types";
 import "./session-group-detail.css";
@@ -299,7 +300,7 @@ export function GroupDetailPanel(props: GroupDetailPanelProps) {
         <div className="space-y-1"><p className="text-[11px] font-medium">复制来源</p>{sourceSelect("选择复制来源")}</div>
         <div className="space-y-1"><p className="text-[11px] font-medium">目标账号</p><Select value={props.addTargetId} onValueChange={props.setAddTargetId} disabled={props.busy || detail.addTargets.length === 0}>
           <SelectTrigger size="sm" className="w-full min-w-0 bg-background text-xs" aria-label="目标关联账号"><SelectValue placeholder="选择兼容账号" /></SelectTrigger>
-          <SelectContent>{detail.addTargets.map((account) => <SelectItem key={account.id} value={account.id} className="text-xs">{account.nickname || account.email || account.uid || account.id} · {variantLabel(accountVariant(account))}</SelectItem>)}</SelectContent>
+          <SelectContent>{detail.addTargets.map((account) => <SelectItem key={account.id} value={account.id} className="text-xs">{displayName(account)} · {variantLabel(accountVariant(account))}</SelectItem>)}</SelectContent>
         </Select></div>
         {detail.addTargets.length === 0 && <p className="text-[11px] text-muted-foreground">没有可添加的兼容账号。</p>}
         <DemoAction className="w-full"><Button size="sm" className="h-8 w-full text-xs" disabled={props.busy || !selectedSource || !props.addTargetId} onClick={() => void completeAdd()}><Copy className="size-3.5" />{props.busy ? "处理中…" : "复制并关联"}</Button></DemoAction>

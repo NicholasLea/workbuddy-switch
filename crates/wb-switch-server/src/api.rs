@@ -114,6 +114,10 @@ pub fn router() -> Router {
             post(api_vscode_ext_session_links_preview),
         )
         .route("/api/delete", post(api_delete))
+        .route(
+            "/api/update-account-display",
+            post(api_update_account_display),
+        )
         .route("/api/oauth/start", post(api_oauth_start))
         .route("/api/oauth/status", post(api_oauth_status))
         .route("/api/import-local", post(api_import_local))
@@ -660,6 +664,18 @@ async fn api_delete(Json(body): Json<Value>) -> Response {
     let id = body.get("accountId").and_then(|v| v.as_str()).unwrap_or("");
     match account::delete_account(id) {
         Ok(()) => json_ok(json!({ "ok": true })),
+        Err(e) => json_err(e, StatusCode::BAD_REQUEST),
+    }
+}
+
+/// POST /api/update-account-display —— 更新账号本地展示字段（备注 / 显示选择）。
+///
+/// body：`{ accountId, patch }`，patch 可含 `note`（字符串或 null）与 `displayField`。
+async fn api_update_account_display(Json(body): Json<Value>) -> Response {
+    let id = body.get("accountId").and_then(|v| v.as_str()).unwrap_or("");
+    let patch = body.get("patch").cloned().unwrap_or_else(|| json!({}));
+    match account::update_account_display(id, &patch) {
+        Ok(meta) => json_ok(json!({ "ok": true, "account": meta })),
         Err(e) => json_err(e, StatusCode::BAD_REQUEST),
     }
 }
