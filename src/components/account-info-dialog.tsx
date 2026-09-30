@@ -102,7 +102,7 @@ export function AccountInfoDialog({ open, onOpenChange, account, onSaved }: Prop
           <DialogDescription>查看账号信息；备注与显示字段仅保存在本机。</DialogDescription>
         </DialogHeader>
 
-        <div className="space-y-4">
+        <div className="space-y-5">
           <dl className="space-y-2 rounded-lg border bg-muted/30 p-3 text-xs">
             {infoRows.map(([label, value]) => (
               <div key={label} className="flex items-start gap-3">
@@ -114,7 +114,7 @@ export function AccountInfoDialog({ open, onOpenChange, account, onSaved }: Prop
             ))}
           </dl>
 
-          <div className="space-y-1.5">
+          <div className="space-y-2">
             <Label htmlFor="account-note">备注</Label>
             <Input
               id="account-note"
@@ -125,12 +125,12 @@ export function AccountInfoDialog({ open, onOpenChange, account, onSaved }: Prop
             />
           </div>
 
-          <div className="space-y-1.5">
+          <div className="space-y-2">
             <Label>卡片显示</Label>
             <RadioGroup
               value={effectiveField}
               onValueChange={(value) => setField(value as DisplayField)}
-              className="gap-2"
+              className="gap-2.5"
             >
               {FIELD_OPTIONS.map((opt) => {
                 const id = `display-field-${opt.value}`;
