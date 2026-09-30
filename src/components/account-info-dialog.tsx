@@ -95,11 +95,11 @@ export function AccountInfoDialog({ open, onOpenChange, account, onSaved }: Prop
         </DialogHeader>
 
         <div className="space-y-4">
-          <dl className="space-y-1.5 rounded-lg border bg-muted/30 p-3 text-xs">
+          <dl className="space-y-2 rounded-lg border bg-muted/30 p-3 text-xs">
             {infoRows.map(([label, value]) => (
-              <div key={label} className="flex items-center justify-between gap-3">
-                <dt className="shrink-0 text-muted-foreground">{label}</dt>
-                <dd className="min-w-0 truncate font-medium" title={value ?? ""}>
+              <div key={label} className="flex items-start gap-3">
+                <dt className="w-14 shrink-0 text-muted-foreground">{label}</dt>
+                <dd className="min-w-0 flex-1 truncate font-medium" title={value ?? ""}>
                   {value || "—"}
                 </dd>
               </div>
@@ -108,30 +108,18 @@ export function AccountInfoDialog({ open, onOpenChange, account, onSaved }: Prop
 
           <div className="space-y-1.5">
             <Label htmlFor="account-note">备注</Label>
-            <div className="flex items-center gap-2">
-              <Input
-                id="account-note"
-                value={note}
-                maxLength={NOTE_MAX_LENGTH}
-                placeholder={`最多 ${NOTE_MAX_LENGTH} 个字符`}
-                onChange={(e) => setNote(e.target.value)}
-              />
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                className="shrink-0"
-                disabled={!note}
-                onClick={() => setNote("")}
-              >
-                清空
-              </Button>
-            </div>
+            <Input
+              id="account-note"
+              value={note}
+              maxLength={NOTE_MAX_LENGTH}
+              placeholder={`最多 ${NOTE_MAX_LENGTH} 个字符`}
+              onChange={(e) => setNote(e.target.value)}
+            />
           </div>
 
           <div className="space-y-1.5">
             <Label>卡片显示</Label>
-            <div className="flex flex-wrap gap-2">
+            <div className="grid grid-cols-3 gap-2">
               {FIELD_OPTIONS.map((opt) => {
                 const disabled = opt.value === "phone" && !hasPhone;
                 return (
