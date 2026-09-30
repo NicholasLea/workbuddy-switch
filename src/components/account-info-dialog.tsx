@@ -13,7 +13,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
+import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import * as api from "@/lib/api";
 import { accountVariant, variantLabel } from "@/lib/variant";
 import type { AccountMeta, DisplayField } from "@/lib/types";
@@ -127,28 +127,28 @@ export function AccountInfoDialog({ open, onOpenChange, account, onSaved }: Prop
 
           <div className="space-y-1.5">
             <Label>卡片显示</Label>
-            <ToggleGroup
-              type="single"
+            <RadioGroup
               value={effectiveField}
-              onValueChange={(value) => {
-                // type="single" 点击已选中项会回传空串；显示字段必须保留一项。
-                if (value) setField(value as DisplayField);
-              }}
-              variant="outline"
-              size="sm"
-              className="w-full"
+              onValueChange={(value) => setField(value as DisplayField)}
+              className="gap-2"
             >
-              {FIELD_OPTIONS.map((opt) => (
-                <ToggleGroupItem
-                  key={opt.value}
-                  value={opt.value}
-                  disabled={opt.value === "phone" && !hasPhone}
-                  className="grow basis-0"
-                >
-                  {opt.label}
-                </ToggleGroupItem>
-              ))}
-            </ToggleGroup>
+              {FIELD_OPTIONS.map((opt) => {
+                const id = `display-field-${opt.value}`;
+                return (
+                  <div key={opt.value} className="flex items-center gap-2">
+                    <RadioGroupItem
+                      value={opt.value}
+                      id={id}
+                      disabled={opt.value === "phone" && !hasPhone}
+                      className="peer"
+                    />
+                    <Label htmlFor={id} className="cursor-pointer font-normal">
+                      {opt.label}
+                    </Label>
+                  </div>
+                );
+              })}
+            </RadioGroup>
             {!hasPhone && (
               <p className="text-xs text-muted-foreground">该账号没有手机号，无法按手机号显示。</p>
             )}
