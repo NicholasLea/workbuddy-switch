@@ -403,7 +403,8 @@ fn start_checkin_all<R: Runtime>(app: &AppHandle<R>) {
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
         let _busy = CheckinBusyGuard { app: app.clone() };
-        let payload = checkin::run_checkin_all(None).await;
+        // 托盘「一键签到」保持立即语义，不遵守签到时间段（respect_window=false）。
+        let payload = checkin::run_checkin_all(None, false).await;
         let text = format_checkin_tooltip(&payload);
         if checkin_succeeded(&payload) {
             notify_checkin(&app, &text);

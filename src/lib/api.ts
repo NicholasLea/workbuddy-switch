@@ -870,17 +870,22 @@ export function checkin(accountId: string): Promise<CheckinResult> {
 /**
  * 批量签到：不传档位时覆盖全部档位；显式传入时只处理该档位。
  * 关闭自动签到的账号会被跳过，并逐账号返回 skipped 原因（设置页与托盘同样遵守）。
+ * `respectWindow=true` 时遵守签到时间段：窗口外整轮返回 skipped /
+ * `outside_checkin_window`，不发起任何签到请求（账号页「刷新并签到」专用）；
+ * 缺省不下发该字段，保持设置页 / 托盘 / 旧客户端的立即签到语义。
  *
  * 这里**不能**用 `variantArgs`：`checkin_all` 的缺省语义是「全部档位」，国内版若
  * 缺省不传参，账号页在国内版 Tab 触发的批量签到会打到国际版账号。显式下发 `cn`
  * 与改造前等价（改造前账号库里只有国内版账号）。
  */
-export function checkinAll(variant?: WbVariant): Promise<{
+export function checkinAll(variant?: WbVariant, respectWindow?: boolean): Promise<{
   accounts: { accountId: string; email: string; result: string; error?: string; inactive?: boolean; reason?: string }[];
   status?: string;
   reason?: string;
 }> {
-  return call("checkin_all", variant ? { variant } : {});
+  const args: Record<string, unknown> = variant ? { variant } : {};
+  if (respectWindow === true) args.respectWindow = true;
+  return call("checkin_all", args);
 }
 
 export function getAutoCheckinConfig(): Promise<CheckinConfig> {

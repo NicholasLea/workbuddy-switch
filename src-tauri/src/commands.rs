@@ -1098,13 +1098,16 @@ pub async fn checkin(account_id: String) -> Result<Value, String> {
     Ok(checkin::checkin_account(&acc).await)
 }
 
-/// POST /api/checkin/all —— 全部账号立即签到（每个账号按自身档位）。
+/// POST /api/checkin/all —— 全部账号批量签到（每个账号按自身档位）。
 /// `variant` 缺省为 `None`（全部档位，保持原行为）；显式传入时只处理该档位。
 /// 关闭自动签到的账号逐账号返回 skipped 原因（设置页与托盘同样遵守）。
+/// `respectWindow` 只由账号页「刷新并签到」传 `true`：窗口生效且当前不在时间段内
+/// 时整轮跳过（逐账号 `skipped` / `outside_checkin_window`）；缺省 `false` =
+/// 设置页 / 托盘 / 单账号入口的立即签到语义。
 #[tauri::command]
-pub async fn checkin_all(variant: Option<String>) -> Value {
+pub async fn checkin_all(variant: Option<String>, respect_window: Option<bool>) -> Value {
     let variant = variant.as_deref().map(|raw| WbVariant::parse(Some(raw)));
-    checkin::run_checkin_all(variant).await
+    checkin::run_checkin_all(variant, respect_window.unwrap_or(false)).await
 }
 
 /// GET /api/checkin/config —— 自动签到配置。

@@ -244,7 +244,7 @@ export default function AccountsPage() {
   /** 旅行 chip 与旅行状态轮询只在自动旅行开启后生效（配置未读到 = 未开启）。 */
   const autoTravelEnabled = travelAvailable && autoTravelConfig?.enabled === true;
   /** 刷新按钮文案：国际版没有签到接口，只刷新积分。 */
-  const refreshCreditsLabel = checkinAvailable ? "刷新全部账号积分并签到（忽略已关闭自动签到的账号）" : "刷新全部账号积分";
+  const refreshCreditsLabel = checkinAvailable ? "刷新全部账号积分并签到（仅在签到时间段内签到；忽略已关闭自动签到的账号）" : "刷新全部账号积分";
   /** 关闭自动签到的账号 id（配置未读到/读取失败 = 空名单）。 */
   const excludedCheckinIds = useMemo(
     () => new Set(autoCheckinConfig?.excluded_account_ids ?? []),
@@ -646,7 +646,7 @@ export default function AccountsPage() {
     }
   }
 
-  /** 刷新附带的签到遵守账号开关；所有账号照常刷新积分，提示实际忽略数量。 */
+  /** 刷新附带的签到遵守账号开关与签到时间段；所有账号照常刷新积分，提示实际忽略/未到时间段数量。 */
   async function onRefreshCredits() {
     if (!visibleAccounts.length || refreshingCredits || checkinAllRunning) return;
     setCheckinAllRunning(true);
@@ -657,19 +657,21 @@ export default function AccountsPage() {
     try {
       if (checkinAvailable) {
         try {
-          const res = await api.checkinAll(variant);
+          const res = await api.checkinAll(variant, true);
           const entries = res.accounts ?? [];
           const success = entries.filter((e) => e.result === "success").length;
           const already = entries.filter((e) => e.result === "already").length;
           const failed = entries.filter((e) => e.result === "error").length;
           const inactive = entries.filter((e) => e.inactive === true || e.result === "inactive").length;
           const skipped = entries.filter((e) => e.result === "skipped" && e.reason === "auto_checkin_disabled").length;
+          const outsideWindow = entries.filter((e) => e.result === "skipped" && e.reason === "outside_checkin_window").length;
           const parts: string[] = [];
           if (success > 0) parts.push(`${success} 个签到成功`);
           if (already > 0) parts.push(`${already} 个已签到`);
           if (inactive > 0) parts.push(`${inactive} 个未开放签到`);
           if (failed > 0) parts.push(`${failed} 个失败`);
           if (skipped > 0) parts.push(`已忽略 ${skipped} 个关闭自动签到的账号`);
+          if (outsideWindow > 0) parts.push(`${outsideWindow} 个未到签到时间段`);
           summary = res.status === "skipped" && res.reason === "already_running"
             ? "签到任务正在进行，本次仅刷新积分"
             : parts.length > 0 ? parts.join("，") : "无账号需要签到";
