@@ -585,11 +585,13 @@ mod tests {
 
     #[test]
     fn skips_when_nothing_urgent() {
-        // 所有账号 5 天后才过期：最紧迫剩余 > 72h → 不切
+        // 所有账号 5 天后才过期：最紧迫剩余 > 72h → 不切。
+        // 目标账号额外多给 1 分钟余量：判定函数会重新采样 now_ms()，
+        // 若两次采样跨过 1 毫秒，截断除法会把「5 天」打成「4 天」。
         let now = now_ms();
         let candidates = vec![
             cand("a", Some(now + 6 * 24 * 3_600_000), 100.0, true),
-            cand("b", Some(now + 5 * 24 * 3_600_000), 50.0, true),
+            cand("b", Some(now + 5 * 24 * 3_600_000 + 60_000), 50.0, true),
         ];
         assert_eq!(
             dt(&candidates, Some("a")),
