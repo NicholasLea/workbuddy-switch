@@ -4088,12 +4088,19 @@ fn recover_sync_operation(paths: &SessionPaths, mut operation: Operation) -> Rec
     let untouched = before_row.is_some_and(|before| {
         before.updated_at == row.updated_at && (!status_matters || before.status == row.status)
     });
-    // 状态写没写上不能只看 updated_at：用户取消归档或改为活跃态时时间可能仍是本次值。
-    let status_applied = match manifest.db.new_status.as_deref() {
-        Some(expected) => applied && row.status.as_deref() == Some(expected),
-        None => applied,
+    // 状态到底有没有写上去，不能只看时间戳：用户取消归档或改为活跃态时时间戳可能
+    // 仍是本次值。但正文模式里归档只是副作用，允许被合法跳过（见
+    // planned_status_change：目标变为活跃态时跳过），跳过与否每次都由现场状态重新
+    // 推导、结果一致，因此只要本次时间戳已落库，这一步就算完成。
+    // 仅同步归档里状态是全部动作，必须额外确认状态也等于本次新值。
+    let db_applied = match (
+        manifest.mode == SyncMode::StatusOnly,
+        manifest.db.new_status.as_deref(),
+    ) {
+        (true, Some(expected)) => applied && row.status.as_deref() == Some(expected),
+        _ => applied,
     };
-    if !(status_applied || untouched) && before_updated_at.is_some() {
+    if !(db_applied || untouched) && before_updated_at.is_some() {
         // 既不是本次写入的值、也不是覆盖前的值：被其它程序改动过，不覆盖。
         return needs(
             "目标会话记录的状态或更新时间与本次保存及覆盖前值都不一致（可能被其它程序改动），已停止恢复"
@@ -4415,6 +4422,16 @@ mod tests {
             conn.execute(
                 "UPDATE sessions SET status = ?1 WHERE id = ?2",
                 rusqlite::params![status, id],
+            )
+            .unwrap();
+        }
+
+        /// 设置更新时间戳（构造「本次时间戳已落库」的中断现场）。
+        fn set_updated_at(&self, id: &str, updated_at: i64) {
+            let conn = Connection::open(self.paths.workbuddy_db()).unwrap();
+            conn.execute(
+                "UPDATE sessions SET updated_at = ?1 WHERE id = ?2",
+                rusqlite::params![updated_at, id],
             )
             .unwrap();
         }
@@ -9510,6 +9527,53 @@ mod tests {
             std::fs::read_to_string(env.body_path(&target_id)).unwrap(),
             incoming_text(&env, "sess-1", &target_id),
             "正文必须补完"
+        );
+    }
+
+    /// 跳过归档副作用后「提交数据库 → 完成标记落盘前」再次崩溃：恢复必须能补完，
+    /// 不能把自己合法产生的「本次时间戳 + active」判成外部修改。
+    #[test]
+    fn body_mode_recovery_survives_second_crash_after_archive_skipped() {
+        let env = ready_env_with_status("body-skip-second-crash");
+        let (group_id, token, target_id) = fast_forward_archive_scene(&env, "completed");
+        install_block_update_trigger(&env);
+        let report = sync(
+            &env,
+            "uid-b",
+            &[selection(&group_id, &token, SyncMode::FastForward)],
+        );
+        assert!(report["synced"].as_array().unwrap().is_empty(), "{report}");
+        drop_block_update_trigger(&env);
+        // 目标被打开并开始生成：归档副作用将被合法跳过。
+        env.set_status(&target_id, "active");
+
+        // 手工构造「已跳过归档并提交数据库、完成标记未落盘」的现场。
+        let mut operation = sync_operations(&env)[0].clone();
+        let manifest = load_sync_manifest(
+            Path::new(operation.backup.as_ref().unwrap())
+                .parent()
+                .unwrap(),
+        )
+        .expect("清单必须可读");
+        env.set_updated_at(&target_id, manifest.db.new_updated_at);
+        operation.phase = OpPhase::DbWritten;
+        session_link::save_operation(&env.paths, &operation).unwrap();
+
+        let recovery = recover_pending_session_operations_at(&env.paths, WbVariant::Cn);
+        assert!(
+            recovery.needs_recovery.is_empty(),
+            "跳过归档后的二次崩溃不得阻断恢复：{:?}",
+            recovery.needs_recovery
+        );
+        assert_eq!(recovery.recovered.len(), 1, "{:?}", recovery);
+        assert_eq!(
+            env.status_of(&target_id).as_deref(),
+            Some("active"),
+            "活跃会话绝不能被归档"
+        );
+        assert_eq!(
+            std::fs::read_to_string(env.body_path(&target_id)).unwrap(),
+            incoming_text(&env, "sess-1", &target_id)
         );
     }
 
