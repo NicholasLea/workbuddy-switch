@@ -3389,16 +3389,12 @@ fn update_target_session_row(
             if after.updated_at != Some(new_updated_at) {
                 return Err("目标会话记录更新时间未按本次保存生效，未按成功处理".to_string());
             }
-            // 状态：本次要写则必须已是新值；未授权写状态时不得被别的程序改动。
-            // 旧清单（本改动之前生成）与缺列的库都记不到 status，此时无从比对，
-            // 必须跳过——否则真实库上「None vs Some(...)」恒不相等，会把旧清单的
-            // 正常恢复全部误判成「状态被改动」而回滚。
-            let expected_status = match status_change {
-                Some(change) => Some(change.after.to_string()),
-                None => before.status.clone(),
-            };
-            if let Some(expected) = expected_status {
-                if after.status != Some(expected) {
+            // 只在本次确实写状态时才校验状态。不写状态的正文同步里，目标被第三方
+            // 从 completed 改成 active 属于与本次无关的変化，保留当前状态继续补完
+            // 正文，不能把一次正常的正文恢复升级成人工处理。
+            // （旧清单同样记不到 status：此处若拿 None 去比对，真实库上恒不相等。）
+            if let Some(change) = status_change {
+                if after.status.as_deref() != Some(change.after) {
                     return Err("目标会话记录的状态在保存期间发生变化，已回滚本次更新".to_string());
                 }
             }
@@ -3538,6 +3534,29 @@ fn status_change_of(manifest: &SyncBackupManifest) -> Result<Option<StatusChange
     Ok(Some(StatusChange { before, after }))
 }
 
+/// 正文模式下本次实际执行的状态写入。
+///
+/// 正文模式的归档是副作用：目标已不在可归档的状态（例如被打开后变成 active）时，
+/// 不能为了归档把正文恢复卡成人工处理——跳过状态写入，正文照常补完。
+/// 仅同步归档里状态就是全部动作，必须保留要求，由事务内条件 UPDATE 兜底。
+fn planned_status_change<'a>(
+    paths: &SessionPaths,
+    operation: &Operation,
+    manifest: &'a SyncBackupManifest,
+) -> Result<Option<StatusChange<'a>>, String> {
+    let Some(change) = status_change_of(manifest)? else {
+        return Ok(None);
+    };
+    if manifest.mode == SyncMode::StatusOnly {
+        return Ok(Some(change));
+    }
+    let current =
+        session_row_snapshot(paths, &operation.target.session_id)?.and_then(|row| row.status);
+    let still_archivable = current.as_deref() == Some(change.after)
+        || current.as_deref() == Some(change.before.as_str());
+    Ok(still_archivable.then_some(change))
+}
+
 /// 仅同步归档的阶段推进：`Prepared → DbWritten → Completed`。
 ///
 /// 跳过 `BodyWritten` 与 `LinksCommitted`：本次没有正文写入，也不产生新基线，
@@ -3640,7 +3659,7 @@ fn run_sync_phases(
 
     // 数据库：更新目标行 updated_at 是幂等操作（同一时间戳重复写等价），
     // 未命中归属/已删除时直接失败，不报成功。
-    let status_change = status_change_of(manifest)?;
+    let status_change = planned_status_change(paths, operation, manifest)?;
     update_target_session_row(
         paths,
         &operation.target,
@@ -4004,20 +4023,23 @@ fn recover_sync_operation(paths: &SessionPaths, mut operation: Operation) -> Rec
     match &body {
         // 后续无关修改（用户/官方 App 追加过内容）或内容不可验证：停止恢复，不覆盖。
         SyncBodyState::Unknown(reason) => return needs(reason.clone(), false),
+        // 状态同步不写正文，也永远不会推进到 BodyWritten：正文丢失后若按正文口径
+        // 拦截，每次启动都会重跑并失败，等于永久阻断启动。已提交的状态予以保留，
+        // 只放弃本次归档意图（不写库、不补正文、不重建文件）。
+        // 必须排在「已写正文却丢失」的通用拦截之前——DbWritten 晚于 BodyWritten，
+        // 否则归档已提交的现场会先被通用分支截走，永远走不到这里。
+        SyncBodyState::Gone if manifest.mode == SyncMode::StatusOnly => {
+            abandon_operation_with(
+                paths,
+                &mut operation,
+                "目标内容已不存在，本次仅同步归档已放弃，已提交的状态保持不变",
+            );
+            return RecoverOutcome::Abandoned(operation_id);
+        }
         SyncBodyState::Gone if operation.phase >= OpPhase::BodyWritten => {
             return needs("目标内容丢失，已停止恢复".to_string(), false);
         }
         _ => {}
-    }
-    // 状态同步不写正文，也永远不会推进到 BodyWritten：正文文件被删后每次启动都会
-    // 重跑并失败，等于永久阻断启动。放弃本次归档意图（不写库、不补正文、不重建文件）。
-    if manifest.mode == SyncMode::StatusOnly && matches!(body, SyncBodyState::Gone) {
-        abandon_operation_with(
-            paths,
-            &mut operation,
-            "目标内容已不存在，本次仅同步归档已放弃，未改动会话状态",
-        );
-        return RecoverOutcome::Abandoned(operation_id);
     }
 
     // 3) 目标行：归属与更新时间必须可安全识别。
@@ -4059,9 +4081,10 @@ fn recover_sync_operation(paths: &SessionPaths, mut operation: Operation) -> Rec
     let before_row = manifest.db.target_row.as_ref();
     let before_updated_at = before_row.and_then(|row| row.updated_at);
     let applied = row.updated_at == Some(manifest.db.new_updated_at);
-    // 状态相等只在本次确实要写状态时才要求：不写状态的正文同步被第三方改了
-    // status 不该被连带判成「被其它程序改动」，把一次正常的正文恢复变成人工处理。
-    let status_matters = manifest.db.new_status.is_some();
+    // 状态相等只在「状态就是全部动作」时才要求（仅同步归档）。正文模式的归档是
+    // 副作用：目标被打开变成 active 属于与本次正文同步无关的変化，不能因此把一次
+    // 正常的正文恢复升级成人工处理——由下面的状态写入决策决定是否跳过归档。
+    let status_matters = manifest.mode == SyncMode::StatusOnly;
     let untouched = before_row.is_some_and(|before| {
         before.updated_at == row.updated_at && (!status_matters || before.status == row.status)
     });
@@ -9413,6 +9436,81 @@ mod tests {
         assert!(group["archiveAction"].is_null(), "{group}");
         assert!(group["previewToken"].is_null(), "{group}");
         assert_eq!(env.status_of(&target_id).as_deref(), Some("completed"));
+    }
+
+    /// 归档已提交、完成标记未落盘，之后正文丢失：放弃本次，保留已提交的状态。
+    ///
+    /// `DbWritten` 晚于 `BodyWritten`，若放弃分支排在「已写正文却丢失」的通用拦截
+    /// 之后，这个现场会先被通用分支截走并永久阻断启动。
+    #[test]
+    fn status_sync_abandons_when_body_lost_after_db_commit() {
+        let env = ready_env_with_status("status-gone-after-commit");
+        let (group_id, token, target_id) = archive_scene(&env, "completed");
+        install_block_update_trigger(&env);
+        let report = sync(
+            &env,
+            "uid-b",
+            &[selection(&group_id, &token, SyncMode::StatusOnly)],
+        );
+        assert!(report["synced"].as_array().unwrap().is_empty(), "{report}");
+        drop_block_update_trigger(&env);
+
+        // 手工推进到「数据库已提交、完成标记未落盘」的现场：状态置为本次新值，
+        // 操作阶段停在 DbWritten。
+        env.set_status(&target_id, "archived");
+        let mut operation = sync_operations(&env)[0].clone();
+        operation.phase = OpPhase::DbWritten;
+        session_link::save_operation(&env.paths, &operation).unwrap();
+        std::fs::remove_file(env.body_path(&target_id)).unwrap();
+
+        let recovery = recover_pending_session_operations_at(&env.paths, WbVariant::Cn);
+        assert!(
+            recovery.needs_recovery.is_empty(),
+            "归档已提交后正文丢失不得变成人工处理：{:?}",
+            recovery.needs_recovery
+        );
+        assert_eq!(recovery.abandoned.len(), 1, "{:?}", recovery);
+        assert_eq!(
+            env.status_of(&target_id).as_deref(),
+            Some("archived"),
+            "已提交的状态必须保留"
+        );
+        assert!(!env.body_path(&target_id).exists(), "不得补写或重建正文");
+    }
+
+    /// 不写状态的正文恢复：目标状态被改成 active 也照常补完，不被状态变化阻断。
+    #[test]
+    fn body_only_recovery_tolerates_unrelated_status_change() {
+        let env = ready_env_with_status("body-recovery-status-changed");
+        let (group_id, token, target_id) = fast_forward_archive_scene(&env, "completed");
+        install_block_update_trigger(&env);
+        let report = sync(
+            &env,
+            "uid-b",
+            &[selection(&group_id, &token, SyncMode::FastForward)],
+        );
+        assert!(report["synced"].as_array().unwrap().is_empty(), "{report}");
+        drop_block_update_trigger(&env);
+        // 中断期间目标被打开并开始生成：状态变为 active（与本次正文同步无关）。
+        env.set_status(&target_id, "active");
+
+        let recovery = recover_pending_session_operations_at(&env.paths, WbVariant::Cn);
+        assert!(
+            recovery.needs_recovery.is_empty(),
+            "与状态无关的正文恢复不得被阻断：{:?}",
+            recovery.needs_recovery
+        );
+        assert_eq!(recovery.recovered.len(), 1, "{:?}", recovery);
+        assert_eq!(
+            env.status_of(&target_id).as_deref(),
+            Some("active"),
+            "本次不写状态，必须保留当前状态"
+        );
+        assert_eq!(
+            std::fs::read_to_string(env.body_path(&target_id)).unwrap(),
+            incoming_text(&env, "sess-1", &target_id),
+            "正文必须补完"
+        );
     }
 
     /// 造一个「正文已写入、数据库未更新」的中断现场：返回 (目标会话 id, 覆盖前正文, 本次写入正文)。
