@@ -2141,12 +2141,17 @@ fn preview_group_item(
         .collect();
     // 归档资格：独立于正文判定，只看双方会话行的状态。来源已归档 + 目标处于非活跃
     // 终态才授权；缺列/NULL/活跃态一律不授权，也不因此影响既有正文判定的结果。
-    let archive = preview_archive_state(
+    // 不可验证的判定不提供任何动作：此时既没有正文模式也不会下发凭据，若仍写出
+    // archiveAction，前端摘要会显示「仅同步归档」而用户实际勾不了，等于误导。
+    let mut archive = preview_archive_state(
         &source_paths,
         &source_member.session_id,
         &target_paths,
         &target_member.session_id,
     );
+    if decision.verdict == SyncVerdict::Unknown {
+        archive.action = None;
+    }
     let archive_action = archive.action.clone();
     // 只归档项（内容一致/仅目标有更新）默认勾选：它们本来没有正文动作，不勾就永远
     // 传导不到归档。快进沿用自身默认值；冲突（diverge）仍须用户显式勾选。
@@ -3385,13 +3390,17 @@ fn update_target_session_row(
                 return Err("目标会话记录更新时间未按本次保存生效，未按成功处理".to_string());
             }
             // 状态：本次要写则必须已是新值；未授权写状态时不得被别的程序改动。
-            // 缺列的库两侧同为 None，这里自然放行。
+            // 旧清单（本改动之前生成）与缺列的库都记不到 status，此时无从比对，
+            // 必须跳过——否则真实库上「None vs Some(...)」恒不相等，会把旧清单的
+            // 正常恢复全部误判成「状态被改动」而回滚。
             let expected_status = match status_change {
                 Some(change) => Some(change.after.to_string()),
                 None => before.status.clone(),
             };
-            if after.status != expected_status {
-                return Err("目标会话记录的状态在保存期间发生变化，已回滚本次更新".to_string());
+            if let Some(expected) = expected_status {
+                if after.status != Some(expected) {
+                    return Err("目标会话记录的状态在保存期间发生变化，已回滚本次更新".to_string());
+                }
             }
         }
         (Some(_), None) => {}
@@ -4000,6 +4009,16 @@ fn recover_sync_operation(paths: &SessionPaths, mut operation: Operation) -> Rec
         }
         _ => {}
     }
+    // 状态同步不写正文，也永远不会推进到 BodyWritten：正文文件被删后每次启动都会
+    // 重跑并失败，等于永久阻断启动。放弃本次归档意图（不写库、不补正文、不重建文件）。
+    if manifest.mode == SyncMode::StatusOnly && matches!(body, SyncBodyState::Gone) {
+        abandon_operation_with(
+            paths,
+            &mut operation,
+            "目标内容已不存在，本次仅同步归档已放弃，未改动会话状态",
+        );
+        return RecoverOutcome::Abandoned(operation_id);
+    }
 
     // 3) 目标行：归属与更新时间必须可安全识别。
     let row = match session_row_snapshot(paths, &operation.target.session_id) {
@@ -4040,20 +4059,18 @@ fn recover_sync_operation(paths: &SessionPaths, mut operation: Operation) -> Rec
     let before_row = manifest.db.target_row.as_ref();
     let before_updated_at = before_row.and_then(|row| row.updated_at);
     let applied = row.updated_at == Some(manifest.db.new_updated_at);
-    let untouched = before_row
-        .is_some_and(|before| before.status == row.status && before.updated_at == row.updated_at);
+    // 状态相等只在本次确实要写状态时才要求：不写状态的正文同步被第三方改了
+    // status 不该被连带判成「被其它程序改动」，把一次正常的正文恢复变成人工处理。
+    let status_matters = manifest.db.new_status.is_some();
+    let untouched = before_row.is_some_and(|before| {
+        before.updated_at == row.updated_at && (!status_matters || before.status == row.status)
+    });
     // 状态写没写上不能只看 updated_at：用户取消归档或改为活跃态时时间可能仍是本次值。
-    // 因此状态操作额外要求「status 也等于本次新值」。
     let status_applied = match manifest.db.new_status.as_deref() {
         Some(expected) => applied && row.status.as_deref() == Some(expected),
         None => applied,
     };
-    let matched = if manifest.mode == SyncMode::StatusOnly {
-        status_applied || untouched
-    } else {
-        applied || untouched
-    };
-    if !matched && before_updated_at.is_some() {
+    if !(status_applied || untouched) && before_updated_at.is_some() {
         // 既不是本次写入的值、也不是覆盖前的值：被其它程序改动过，不覆盖。
         return needs(
             "目标会话记录的状态或更新时间与本次保存及覆盖前值都不一致（可能被其它程序改动），已停止恢复"
@@ -9301,6 +9318,101 @@ mod tests {
             "{stale:?}"
         );
         let _ = group_id;
+    }
+
+    /// 旧清单在**带 status 列的库**上必须仍能按旧行为恢复完成。
+    ///
+    /// 回归 guarding：旧清单反序列化后 `targetRow.status` 为 None，若拿它去和现场读出的
+    /// `Some("completed")` 比对，会恒不相等并把正常恢复误判成「状态被改动」。
+    #[test]
+    fn legacy_manifest_recovers_on_database_with_status_column() {
+        let env = ready_env_with_status("legacy-manifest-status-db");
+        let (group_id, token, target_id) = fast_forward_archive_scene(&env, "completed");
+        install_block_update_trigger(&env);
+        let report = sync(
+            &env,
+            "uid-b",
+            &[selection(&group_id, &token, SyncMode::FastForward)],
+        );
+        assert!(report["synced"].as_array().unwrap().is_empty(), "{report}");
+        drop_block_update_trigger(&env);
+
+        // 把清单改写成改动之前的旧格式：去掉 status 与 newStatus。
+        let operation = sync_operations(&env)[0].clone();
+        let manifest_path = operation.backup.clone().unwrap();
+        let text = std::fs::read_to_string(&manifest_path).unwrap();
+        let mut value: Value = serde_json::from_str(&text).unwrap();
+        {
+            let db = value.get_mut("db").unwrap().as_object_mut().unwrap();
+            db.remove("newStatus");
+            if let Some(row) = db.get_mut("targetRow").and_then(Value::as_object_mut) {
+                row.remove("status");
+            }
+        }
+        std::fs::write(
+            &manifest_path,
+            serde_json::to_string_pretty(&value).unwrap(),
+        )
+        .unwrap();
+
+        let recovery = recover_pending_session_operations_at(&env.paths, WbVariant::Cn);
+        assert!(
+            recovery.needs_recovery.is_empty(),
+            "旧清单必须能恢复完成：{:?}",
+            recovery.needs_recovery
+        );
+        assert_eq!(recovery.recovered.len(), 1, "{:?}", recovery);
+        // 旧清单不含归档意图：正文补完即可，不得顺手归档。
+        assert_eq!(env.status_of(&target_id).as_deref(), Some("completed"));
+    }
+
+    /// 只归档遇到正文文件被删：放弃本次归档，不写库、不补正文，也不永久阻断启动。
+    #[test]
+    fn status_sync_abandons_when_target_body_gone() {
+        let env = ready_env_with_status("status-body-gone");
+        let (group_id, token, target_id) = archive_scene(&env, "completed");
+        install_block_update_trigger(&env);
+        let report = sync(
+            &env,
+            "uid-b",
+            &[selection(&group_id, &token, SyncMode::StatusOnly)],
+        );
+        assert!(report["synced"].as_array().unwrap().is_empty(), "{report}");
+        drop_block_update_trigger(&env);
+        std::fs::remove_file(env.body_path(&target_id)).unwrap();
+
+        let recovery = recover_pending_session_operations_at(&env.paths, WbVariant::Cn);
+        assert!(
+            recovery.needs_recovery.is_empty(),
+            "正文缺失不得变成需要人工处理：{:?}",
+            recovery.needs_recovery
+        );
+        assert_eq!(recovery.abandoned.len(), 1, "{:?}", recovery);
+        assert_eq!(
+            env.status_of(&target_id).as_deref(),
+            Some("completed"),
+            "放弃时不得写状态"
+        );
+        assert!(!env.body_path(&target_id).exists(), "不得重建正文文件");
+    }
+
+    /// 不可验证（unknown）时不下发 archiveAction：没有凭据就勾不了，发了只会误导。
+    #[test]
+    fn unknown_verdict_never_offers_archive_action() {
+        let env = ready_env_with_status("status-unknown");
+        let report = copy(&env, "uid-b", &["sess-1"]);
+        let target_id = env.first_copy_id(&report);
+        env.set_status("sess-1", "archived");
+        env.set_status(&target_id, "completed");
+        // 删掉目标正文：内容不可验证 → unknown。
+        std::fs::remove_file(env.body_path(&target_id)).unwrap();
+
+        let preview = preview(&env, "uid-b");
+        let group = &preview["groups"][0];
+        assert_eq!(group["verdict"], "unknown", "{preview}");
+        assert!(group["archiveAction"].is_null(), "{group}");
+        assert!(group["previewToken"].is_null(), "{group}");
+        assert_eq!(env.status_of(&target_id).as_deref(), Some("completed"));
     }
 
     /// 造一个「正文已写入、数据库未更新」的中断现场：返回 (目标会话 id, 覆盖前正文, 本次写入正文)。

@@ -146,7 +146,7 @@ export function summarySentence(group: SessionLinkPreviewGroup, targetLabel: str
   }
   const base = bodySummarySentence(group, targetLabel);
   // 正文同步附带归档时，在正文句之后补一句，避免用户以为只同步了正文。
-  return archiveOnly(group) ? `${base}并将会话在「${targetLabel}」一并归档` : base;
+  return archiveOnly(group) ? `${base}，目标会话一并归档` : base;
 }
 
 /** 纯按正文判定给出的摘要句（不含归档补充）。 */
