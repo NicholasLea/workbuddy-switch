@@ -2153,17 +2153,8 @@ fn preview_group_item(
         archive.action = None;
     }
     let archive_action = archive.action.clone();
-    // 只归档项（内容一致/仅目标有更新）默认勾选：它们本来没有正文动作，不勾就永远
-    // 传导不到归档。快进沿用自身默认值；冲突（diverge）仍须用户显式勾选。
-    let default_checked = if archive_action.is_some()
-        && matches!(
-            decision.verdict,
-            SyncVerdict::Identical | SyncVerdict::Ahead
-        ) {
-        true
-    } else {
-        decision.default_checked
-    };
+    // 归档状态同步作为可选操作，默认不勾选（防误操作），由用户主动勾选授权；正文动作沿用自身默认值。
+    let default_checked = decision.default_checked;
     // Keep ordinary sync unavailable for Ahead, but bind its verified snapshot so the
     // session-group "use this copy" flow can explicitly request UnifyOverwrite.
     // 内容一致本身不可勾选，但具备归档资格时要发凭据，否则归档动作无从授权。
@@ -8757,7 +8748,7 @@ mod tests {
             "正文模式仍为空：归档不是正文覆盖"
         );
         assert_eq!(group["archiveAction"], "statusOnly");
-        assert_eq!(group["defaultChecked"], true);
+        assert_eq!(group["defaultChecked"], false);
 
         let body_before = body_bytes(&env, &target_id);
         let pairs_before = pair_snapshot(&env);
@@ -8885,7 +8876,7 @@ mod tests {
         assert_eq!(group["verdict"], "ahead", "{preview_report}");
         assert_eq!(group["availableModes"], json!([]), "切号预览仍不给正文模式");
         assert_eq!(group["archiveAction"], "statusOnly");
-        assert_eq!(group["defaultChecked"], true);
+        assert_eq!(group["defaultChecked"], false);
         let token = group["previewToken"].as_str().unwrap().to_string();
         let group_id = group["groupId"].as_str().unwrap().to_string();
 
