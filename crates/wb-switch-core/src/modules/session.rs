@@ -3657,16 +3657,31 @@ fn run_sync_phases(
         SyncBodyState::Unknown(reason) => return Err(reason),
     };
 
-    // 数据库：更新目标行 updated_at 是幂等操作（同一时间戳重复写等价），
-    // 未命中归属/已删除时直接失败，不报成功。
-    let status_change = planned_status_change(paths, operation, manifest)?;
-    update_target_session_row(
-        paths,
-        &operation.target,
-        manifest.db.new_updated_at,
-        manifest.db.target_row.as_ref(),
-        status_change.as_ref(),
-    )?;
+    // 数据库步骤必须**恰好执行一次**：本次时间戳已落库说明这一步已由本操作提交过，
+    // 重跑会把首次执行时合法跳过的归档副作用补上（当时目标是 active，现在回到
+    // completed 又变成了「可归档」）——等于在恢复里执行了用户当次没同意的动作。
+    // 仅同步归档不受影响：它的 `db_applied` 已确认状态就是本次新值，重跑等价。
+    let db_already_applied = manifest.mode != SyncMode::StatusOnly
+        && session_row_snapshot(paths, &operation.target.session_id)?
+            .and_then(|row| row.updated_at)
+            == Some(manifest.db.new_updated_at);
+    if db_already_applied {
+        // 行仍归属目标账号且未删除即可视为本操作的产物，不写库、不改状态。
+        let owner = session_row_owner(paths, &operation.target.session_id)
+            .ok_or_else(|| "目标会话记录不存在或已被删除，已停止恢复".to_string())?;
+        if owner != operation.target.uid {
+            return Err("目标会话记录归属异常，已停止恢复".to_string());
+        }
+    } else {
+        let status_change = planned_status_change(paths, operation, manifest)?;
+        update_target_session_row(
+            paths,
+            &operation.target,
+            manifest.db.new_updated_at,
+            manifest.db.target_row.as_ref(),
+            status_change.as_ref(),
+        )?;
+    }
     advance_operation(paths, operation, OpPhase::DbWritten)?;
 
     if operation.phase < OpPhase::LinksCommitted {
@@ -9574,6 +9589,55 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(env.body_path(&target_id)).unwrap(),
             incoming_text(&env, "sess-1", &target_id)
+        );
+    }
+
+    /// 正文模式下「数据库已提交、归档曾被跳过、目标又回到终态」：恢复不得重做归档。
+    ///
+    /// 跳过与否是现场状态的纯函数，但**纯函数不等于跨次恢复幂等**——输入状态会变，
+    /// 重新推导就可能从「跳过」翻成「可归档」。数据库步骤必须恰好执行一次。
+    #[test]
+    fn body_mode_recovery_does_not_reapply_skipped_archive() {
+        let env = ready_env_with_status("body-no-rearchive");
+        let (group_id, token, target_id) = fast_forward_archive_scene(&env, "completed");
+        install_block_update_trigger(&env);
+        let report = sync(
+            &env,
+            "uid-b",
+            &[selection(&group_id, &token, SyncMode::FastForward)],
+        );
+        assert!(report["synced"].as_array().unwrap().is_empty(), "{report}");
+        drop_block_update_trigger(&env);
+
+        // 手工构造「数据库已提交且归档被跳过、完成标记未落盘」的现场：时间戳是本次值，
+        // 状态仍是 completed（归档跳过后回到终态，或用户取消了归档）。
+        let mut operation = sync_operations(&env)[0].clone();
+        let manifest = load_sync_manifest(
+            Path::new(operation.backup.as_ref().unwrap())
+                .parent()
+                .unwrap(),
+        )
+        .expect("清单必须可读");
+        env.set_updated_at(&target_id, manifest.db.new_updated_at);
+        operation.phase = OpPhase::DbWritten;
+        session_link::save_operation(&env.paths, &operation).unwrap();
+
+        let recovery = recover_pending_session_operations_at(&env.paths, WbVariant::Cn);
+        assert!(
+            recovery.needs_recovery.is_empty(),
+            "数据库已提交后恢复不得再被阻断：{:?}",
+            recovery.needs_recovery
+        );
+        assert_eq!(recovery.recovered.len(), 1, "{:?}", recovery);
+        assert_eq!(
+            env.status_of(&target_id).as_deref(),
+            Some("completed"),
+            "恢复不得重做已跳过的归档"
+        );
+        assert_eq!(
+            std::fs::read_to_string(env.body_path(&target_id)).unwrap(),
+            incoming_text(&env, "sess-1", &target_id),
+            "正文必须已补完"
         );
     }
 
