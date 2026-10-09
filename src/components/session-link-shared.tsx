@@ -93,8 +93,20 @@ export function primaryMode(group: SessionLinkPreviewGroup): SessionSyncMode | n
   return group.availableModes.length > 0 ? group.availableModes[0] : null;
 }
 
+/** 仅同步归档：`archiveAction` 由后端给出，不随用户勾选变化。 */
+export function archiveOnly(group: SessionLinkPreviewGroup): boolean {
+  return group.archiveAction === "statusOnly";
+}
+
+/**
+ * 该项能否勾选：有正文写入模式，或后端授权了仅同步归档（须带预览凭据）。
+ *
+ * 只归档项的 `availableModes` 为空，必须靠 `archiveAction` 放行，否则内容一致的
+ * 会话永远传导不到归档状态。
+ */
 export function isActionable(group: SessionLinkPreviewGroup): boolean {
-  return primaryMode(group) !== null && Boolean(group.previewToken);
+  if (!group.previewToken) return false;
+  return primaryMode(group) !== null || archiveOnly(group);
 }
 
 /** 可直接同步项：全选只作用于这类会话，覆盖必须单独勾选。 */
@@ -112,14 +124,33 @@ export function buildSelections(
 ): SessionSyncSelection[] {
   return groups.flatMap((group) => {
     if (!checked.has(group.groupId)) return [];
+    if (!group.previewToken) return [];
+    // 正文模式优先：有正文写入就提交该模式，归档作为它的副作用一并由后端处理。
     const mode = primaryMode(group);
-    if (!mode || !group.previewToken) return [];
-    return [{ groupId: group.groupId, previewToken: group.previewToken, mode }];
+    if (mode) return [{ groupId: group.groupId, previewToken: group.previewToken, mode }];
+    // 没有正文模式时，仅同步归档才是可提交的独立动作。
+    if (archiveOnly(group)) {
+      return [
+        { groupId: group.groupId, previewToken: group.previewToken, mode: "statusOnly" as const },
+      ];
+    }
+    return [];
   });
 }
 
 /** 卡片摘要句：一句人话说清发生了什么；条数与原始原因收进「查看详情」。 */
 export function summarySentence(group: SessionLinkPreviewGroup, targetLabel: string): string {
+  // 只归档项：正文判定会说「无需同步/本次不同步」，但本次确实要改状态，必须说清。
+  if (archiveOnly(group) && primaryMode(group) === null) {
+    return "仅同步归档，保留正文";
+  }
+  const base = bodySummarySentence(group, targetLabel);
+  // 正文同步附带归档时，在正文句之后补一句，避免用户以为只同步了正文。
+  return archiveOnly(group) ? `${base}，目标会话一并归档` : base;
+}
+
+/** 纯按正文判定给出的摘要句（不含归档补充）。 */
+function bodySummarySentence(group: SessionLinkPreviewGroup, targetLabel: string): string {
   switch (group.verdict) {
     case "fastForward":
       return `将当前账号的新内容同步到「${targetLabel}」`;
