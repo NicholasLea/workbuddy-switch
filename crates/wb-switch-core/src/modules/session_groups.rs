@@ -2145,6 +2145,9 @@ mod tests {
         let selection = parse_selection("group", "token", "unifyOverwrite").unwrap();
         assert_eq!(selection.mode, SyncMode::UnifyOverwrite);
         assert!(parse_selection("group", "token", "unsupported").is_err());
+        // 会话组统一入口只提交正文模式：只同步归档由切号预览的 archiveAction 表达，
+        // 不在统一入口的模式白名单里，也不影响它对 ahead 的 unifyOverwrite 改写。
+        assert!(parse_selection("group", "token", "statusOnly").is_err());
     }
 
     fn member_view(

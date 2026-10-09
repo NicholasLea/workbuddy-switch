@@ -181,7 +181,7 @@ export interface SessionRecoveryReport {
 export type SessionSyncVerdict = "identical" | "fastForward" | "ahead" | "diverge" | "unknown";
 
 /** 同步写入模式：只有后端 `availableModes` 里给出的模式才允许提交。 */
-export type SessionSyncMode = "fastForward" | "overwrite" | "unifyOverwrite";
+export type SessionSyncMode = "fastForward" | "overwrite" | "unifyOverwrite" | "statusOnly";
 
 /** 关联组成员（不含正文）：`state` 为 active 时才算该账号的有效成员。 */
 export interface SessionLinkMember {
@@ -204,9 +204,17 @@ export interface SessionLinkPreviewGroup {
   extraB: number;
   common: number;
   defaultChecked: boolean;
-  /** 为空表示该项不可勾选（identical / ahead / unknown / 预览凭据不可用）。 */
+  /**
+   * 正文写入模式；为空且没有 `archiveAction` 时才不可勾选
+   * （identical / ahead / unknown / 预览凭据不可用，但仅同步归档仍可勾选）。
+   */
   availableModes: SessionSyncMode[];
   reason: string;
+  /**
+   * 仅同步生命周期状态（把目标对齐为已归档），正文零写入。
+   * 由后端在生成预览时给出，不随用户勾选变化。
+   */
+  archiveAction?: "statusOnly";
   /** 记录数（不是消息数）：不可验证时 source/target 为 0、baseline 为 null。 */
   recordCount: { source: number; target: number; baseline: number | null };
   source: SessionLinkMember | null;
