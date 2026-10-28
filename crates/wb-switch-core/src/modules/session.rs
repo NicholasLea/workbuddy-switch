@@ -563,7 +563,8 @@ fn session_row_owner(paths: &SessionPaths, cid: &str) -> Option<String> {
     .flatten()
 }
 
-/// 在 workbuddy.db 中把源会话行复制为新 id（动态列，覆盖 id/user_id/时间戳）。
+/// 在 workbuddy.db 中把源会话行复制为新 id（动态列，覆盖 id/user_id/updated_at，
+/// created_at 透传源值）。
 ///
 /// 跨档时源行与目标行分属两个库：源行从 `source_paths` 读取（跨档用只读连接），
 /// 目标行按**目标表列序取交集**写入——目标存在而源没有的列不写，由库默认值补齐，
@@ -626,7 +627,15 @@ fn insert_session_copy(
         let value = match col.as_str() {
             "id" => rusqlite::types::Value::Text(new_cid.to_string()),
             "user_id" => rusqlite::types::Value::Text(target_uid.to_string()),
-            "created_at" | "updated_at" => rusqlite::types::Value::Integer(now_ms()),
+            // created_at 是会话历史起点，复制不伪造：源值原样透传，只有源值为 NULL
+            // （旧库没记）时才回退到当前时间，避免把 NULL 下传破坏客户端的时间排序。
+            "created_at" => match value {
+                rusqlite::types::Value::Null => rusqlite::types::Value::Integer(now_ms()),
+                source => source,
+            },
+            // updated_at 恒写当前时间：它驱动「最近更新」排序，副本沿用源值会直接沉底，
+            // 而且副本此刻确实刚被创建。
+            "updated_at" => rusqlite::types::Value::Integer(now_ms()),
             "deleted_at" => rusqlite::types::Value::Null,
             _ => value,
         };
@@ -4465,6 +4474,38 @@ mod tests {
             .unwrap();
         }
 
+        /// 设置历史起点时间戳（`None` 造 NULL：旧库没记下创建时间的形态）。
+        fn set_created_at(&self, id: &str, created_at: Option<i64>) {
+            let conn = Connection::open(self.paths.workbuddy_db()).unwrap();
+            conn.execute(
+                "UPDATE sessions SET created_at = ?1 WHERE id = ?2",
+                rusqlite::params![created_at, id],
+            )
+            .unwrap();
+        }
+
+        fn created_at_of(&self, id: &str) -> Option<i64> {
+            let conn = Connection::open(self.paths.workbuddy_db()).unwrap();
+            conn.query_row(
+                "SELECT created_at FROM sessions WHERE id = ?1",
+                [id],
+                |row| row.get::<_, Option<i64>>(0),
+            )
+            .ok()
+            .flatten()
+        }
+
+        fn updated_at_of(&self, id: &str) -> Option<i64> {
+            let conn = Connection::open(self.paths.workbuddy_db()).unwrap();
+            conn.query_row(
+                "SELECT updated_at FROM sessions WHERE id = ?1",
+                [id],
+                |row| row.get::<_, Option<i64>>(0),
+            )
+            .ok()
+            .flatten()
+        }
+
         fn status_of(&self, id: &str) -> Option<String> {
             let conn = Connection::open(self.paths.workbuddy_db()).unwrap();
             conn.query_row("SELECT status FROM sessions WHERE id = ?1", [id], |row| {
@@ -5125,6 +5166,62 @@ mod tests {
         assert!(session_backup::scan_lifecycle(&env.paths)
             .records
             .is_empty());
+    }
+
+    /// 复制保留源 `created_at`（会话历史起点不伪造），`updated_at` 仍写当前时间。
+    ///
+    /// `updated_at` 驱动客户端「最近更新」排序：副本沿用源的旧值会直接沉底，而副本
+    /// 此刻确实刚被创建，写当前时间才符合事实。
+    #[test]
+    fn copy_preserves_source_created_at_and_refreshes_updated_at() {
+        let env = ready_env("copy-created-at");
+        // 源行由 add_session 写成 created_at=1000 / updated_at=2000。
+        let report = copy(&env, "uid-b", &["sess-1"]);
+        let new_id = env.first_copy_id(&report);
+
+        assert_eq!(env.created_at_of("sess-1"), Some(1000), "源行 created_at");
+        assert_eq!(
+            env.created_at_of(&new_id),
+            Some(1000),
+            "副本必须沿用源的 created_at"
+        );
+        let copied_updated_at = env.updated_at_of(&new_id).expect("副本必须有 updated_at");
+        assert!(
+            copied_updated_at > 2000,
+            "副本 updated_at 必须是本次时间而不是源的旧值：{copied_updated_at}"
+        );
+        assert_eq!(
+            env.updated_at_of("sess-1"),
+            Some(2000),
+            "源行时间戳不得被复制改动"
+        );
+    }
+
+    /// 源行 `created_at` 为 NULL（旧库没记）时回退当前时间：NULL 下传会破坏客户端排序。
+    #[test]
+    fn copy_falls_back_to_now_when_source_created_at_is_null() {
+        let env = ready_env("copy-created-at-null");
+        env.add_session("sess-2", "uid-a", "标题二");
+        env.add_body("sess-2", &body_text("sess-2"));
+        env.set_created_at("sess-2", None);
+        assert_eq!(
+            env.created_at_of("sess-2"),
+            None,
+            "源行 created_at 必须是 NULL"
+        );
+
+        let before = now_ms();
+        let report = copy(&env, "uid-b", &["sess-2"]);
+        let new_id = env.first_copy_id(&report);
+        let after = now_ms();
+
+        let copied_created_at = env
+            .created_at_of(&new_id)
+            .expect("源值为 NULL 时必须回退为具体时间，不得下传 NULL");
+        assert!(
+            (before..=after).contains(&copied_created_at),
+            "回退值必须是本次时间：{copied_created_at} 不在 [{before}, {after}]"
+        );
     }
 
     /// 批量复制逐项清理：进入下一项之前，上一成功项的临时目录已经消失（不累积备份）。
@@ -6172,11 +6269,30 @@ mod tests {
         assert_eq!(outcome, DbCopyOutcome::Inserted);
 
         let conn = Connection::open(env.paths.workbuddy_db()).unwrap();
-        let (id, user_id, title, deleted_at, is_playground): (String, String, String, Option<i64>, i64) =
-            conn.query_row(
-                "SELECT id, user_id, title, deleted_at, is_playground FROM sessions WHERE id = 'new-uuid-1'",
+        let (id, user_id, title, deleted_at, is_playground, created_at, updated_at): (
+            String,
+            String,
+            String,
+            Option<i64>,
+            i64,
+            Option<i64>,
+            Option<i64>,
+        ) = conn
+            .query_row(
+                "SELECT id, user_id, title, deleted_at, is_playground, created_at, updated_at \
+                 FROM sessions WHERE id = 'new-uuid-1'",
                 [],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                        r.get(6)?,
+                    ))
+                },
             )
             .unwrap();
         assert_eq!(id, "new-uuid-1");
@@ -6184,6 +6300,11 @@ mod tests {
         assert_eq!(title, "旧标题"); // 普通列原样保留
         assert_eq!(deleted_at, None);
         assert_eq!(is_playground, 0);
+        assert_eq!(created_at, Some(1000), "created_at 必须是源的会话起点");
+        assert!(
+            updated_at.is_some_and(|value| value > 2000),
+            "updated_at 必须刷新为本次时间：{updated_at:?}"
+        );
     }
 
     #[test]
